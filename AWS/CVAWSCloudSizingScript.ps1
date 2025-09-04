@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#requires -Powershell Version 7.0
 #requires -Modules AWS.Tools.Common, AWS.Tools.EC2, AWS.Tools.S3, AWS.Tools.RDS, AWS.Tools.SecurityToken, AWS.Tools.Organizations, AWS.Tools.IdentityManagement, AWS.Tools.CloudWatch, AWS.Tools.ElasticFileSystem, AWS.Tools.SSO, AWS.Tools.SSOOIDC, AWS.Tools.FSx, AWS.Tools.Backup, AWS.Tools.CostExplorer, AWS.Tools.DynamoDBv2, AWS.Tools.SQS, AWS.Tools.SecretsManager, AWS.Tools.KeyManagementService, AWS.Tools.EKS
 <#
 .SYNOPSIS
@@ -1088,5 +1088,5 @@ if ($existingFiles.Count -gt 0) {
 # Restore original culture settings
 [System.Threading.Thread]::CurrentThread.CurrentCulture = $CurrentCulture
 [System.Threading.Thread]::CurrentThread.CurrentUICulture = $CurrentCulture
-Write-Host "nInventory complete. Results in $archiveFile." -ForegroundColor Cyan
+Write-Host "Inventory complete. Results in $archiveFile." -ForegroundColor Cyan
 Write-Host "All output files have been compressed into the ZIP archive." -ForegroundColor Cyan
