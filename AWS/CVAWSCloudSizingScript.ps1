@@ -1,5 +1,5 @@
-#requires -Powershell Version 7.0
-#requires -Modules AWS.Tools.Common, AWS.Tools.EC2, AWS.Tools.S3, AWS.Tools.RDS, AWS.Tools.SecurityToken, AWS.Tools.Organizations, AWS.Tools.IdentityManagement, AWS.Tools.CloudWatch, AWS.Tools.ElasticFileSystem, AWS.Tools.SSO, AWS.Tools.SSOOIDC, AWS.Tools.FSx, AWS.Tools.Backup, AWS.Tools.CostExplorer, AWS.Tools.DynamoDBv2, AWS.Tools.SQS, AWS.Tools.SecretsManager, AWS.Tools.KeyManagementService, AWS.Tools.EKS
+#requires -Version 7.0
+#requires -Modules ImportExcel, AWS.Tools.Common, AWS.Tools.EC2, AWS.Tools.S3, AWS.Tools.RDS, AWS.Tools.SecurityToken, AWS.Tools.Organizations, AWS.Tools.IdentityManagement, AWS.Tools.CloudWatch, AWS.Tools.ElasticFileSystem, AWS.Tools.SSO, AWS.Tools.SSOOIDC, AWS.Tools.FSx, AWS.Tools.Backup, AWS.Tools.CostExplorer, AWS.Tools.DynamoDBv2, AWS.Tools.SQS, AWS.Tools.SecretsManager, AWS.Tools.KeyManagementService, AWS.Tools.EKS
 <#
 .SYNOPSIS
     AWS Cloud Sizing Script – Comprehensive EC2 and Storage inventory and sizing analysis.
@@ -948,122 +948,295 @@ try {
 
   # Add log file to output files list
   $allOutputFiles.Add($output_log) | Out-Null
-
-  # ---- Excel Summary Creation (if ImportExcel module is available) ----
   try {
-    if (Get-Module -ListAvailable -Name ImportExcel | Where-Object { $_ }) {
-      Write-Host "Creating Excel summary files..." -ForegroundColor Green
-      
-      # Create per-account Excel summaries
-      foreach ($acctInfo in $accountsProcessed) {
-        $accountId = $acctInfo.AccountId
-        $accountAlias = $acctInfo.AccountAlias
-        
-        $ec2List = $ec2ListByAccount[$accountId]
-        $ec2UnattachedVolList = $ec2UnattachedVolListByAccount[$accountId]
-        $s3List = $s3ListByAccount[$accountId]
-        
-        $summaryXlsx = "${accountId}_$date_string.xlsx"
-        if (Test-Path $summaryXlsx) { Remove-Item $summaryXlsx -Force }
+      if (Get-Module -ListAvailable -Name ImportExcel | Where-Object { $_ }) {
+          Write-Host "ImportExcel module found. Proceeding with Excel summary creation..." -ForegroundColor Green
 
-        # Export EC2 instances to Excel
-        if ($ec2List.Count -gt 0){ 
-          $ec2List | Export-Excel -Path $summaryXlsx -WorksheetName 'EC2Instances' -AutoSize -FreezeTopRow -BoldTopRow 
-        }
-        
-        # Export unattached EBS volumes to Excel
-        if ($ec2UnattachedVolList.Count -gt 0){ 
-          $ec2UnattachedVolList | Export-Excel -Path $summaryXlsx -WorksheetName 'EC2UnattachedVolumes' -AutoSize -FreezeTopRow -BoldTopRow 
-        }
-        
-        # Export S3 buckets to Excel
-        if ($s3List.Count -gt 0){ 
-          $s3List | Export-Excel -Path $summaryXlsx -WorksheetName 'S3Buckets' -AutoSize -FreezeTopRow -BoldTopRow 
-        }
+          # Force importing the module
+          Import-Module ImportExcel -Force -ErrorAction Stop
 
-        # Calculate overall storage metrics for summary sheet
-        $totalS3TiB = 0
-        if ($s3List.Count -gt 0) {
-          ($s3List | Get-Member -MemberType NoteProperty | Where-Object Name -like "*_SizeTiB") | ForEach-Object {
-            $totalS3TiB += (($s3List.$($_.Name) | Measure-Object -Sum).Sum)
+          Write-Host "Creating Excel summary files..." -ForegroundColor Green
+
+          # Create per-account Excel summaries
+          foreach ($acctInfo in $accountsProcessed) {
+              $accountId = $acctInfo.AccountId
+              $accountAlias = $acctInfo.AccountAlias
+
+              $ec2List = $ec2ListByAccount[$accountId]
+              $ec2UnattachedVolList = $ec2UnattachedVolListByAccount[$accountId]
+              $s3List = $s3ListByAccount[$accountId]
+
+              $summaryXlsx = "${accountId}_summary_$date_string.xlsx"
+              if (Test-Path $summaryXlsx) { Remove-Item $summaryXlsx -Force }
+
+              # Calculate EC2 total metrics
+              $ec2TotalCount = $ec2List.Count
+              $ec2TotalGiB = ($ec2List.SizeGiB | Measure-Object -Sum).Sum
+              $ec2TotalGB = ($ec2List.SizeGB | Measure-Object -Sum).Sum
+              $ec2TotalTiB = ($ec2List.SizeTiB | Measure-Object -Sum).Sum
+              $ec2TotalTB = ($ec2List.SizeTB | Measure-Object -Sum).Sum
+
+              # Calculate S3 total metrics for all units
+              $s3TotalCount = $s3List.Count
+              $s3TotalTiB = 0
+              $s3TotalGiB = 0
+              $s3TotalGB = 0
+              $s3TotalTB = 0
+            
+              if ($s3List.Count -gt 0) {
+                  # Calculate S3 TiB totals
+                  ($s3List | Get-Member -MemberType NoteProperty | Where-Object Name -like "*_SizeTiB") | ForEach-Object {
+                      $s3TotalTiB += (($s3List.$($_.Name) | Measure-Object -Sum).Sum)
+                  }
+                  
+                  # Calculate S3 GiB totals
+                  ($s3List | Get-Member -MemberType NoteProperty | Where-Object Name -like "*_SizeGiB") | ForEach-Object {
+                      $s3TotalGiB += (($s3List.$($_.Name) | Measure-Object -Sum).Sum)
+                  }
+                  
+                  # Calculate S3 GB totals
+                  ($s3List | Get-Member -MemberType NoteProperty | Where-Object Name -like "*_SizeGB") | ForEach-Object {
+                      $s3TotalGB += (($s3List.$($_.Name) | Measure-Object -Sum).Sum)
+                  }
+                  
+                  # Calculate S3 TB totals
+                  ($s3List | Get-Member -MemberType NoteProperty | Where-Object Name -like "*_SizeTB") | ForEach-Object {
+                      $s3TotalTB += (($s3List.$($_.Name) | Measure-Object -Sum).Sum)
+                  }
+              }
+
+              # Get all regions from resources
+              $allRegions = [System.Collections.ArrayList]::new()
+              
+              # Add regions from EC2 instances
+              if ($ec2List -and $ec2List.Count -gt 0) {
+                  $ec2List.Region | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object {
+                      if (-not $allRegions.Contains($_)) { $allRegions.Add($_) | Out-Null }
+                  }
+              }
+              
+              # Add regions from S3 buckets
+              if ($s3List -and $s3List.Count -gt 0) {
+                  $s3List.Region | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object {
+                      if (-not $allRegions.Contains($_)) { $allRegions.Add($_) | Out-Null }
+                  }
+              }
+              
+              # Sort the regions
+              $allRegions = $allRegions | Sort-Object
+
+              #---------- EC2 SUMMARY SECTION ----------
+              # EC2 Overall Summary
+              $ec2Summary = [PSCustomObject]@{
+                  "ResourceType" = "EC2 Instances"
+                  "Region"       = "All"
+                  "Count"        = $ec2TotalCount
+                  "Total Size (GiB)" = $ec2TotalGiB
+                  "Total Size (GB)"  = $ec2TotalGB
+                  "Total Size (TiB)" = $ec2TotalTiB
+                  "Total Size (TB)"  = $ec2TotalTB
+              }
+
+              # EC2 Regional Breakdown
+              $ec2RegionalSummary = @()
+              foreach ($region in $allRegions) {
+                  $ec2InRegion = $ec2List | Where-Object Region -eq $region
+                  $regionEc2Count = $ec2InRegion.Count
+                  if ($regionEc2Count -gt 0) {
+                      $regionEc2GiB = ($ec2InRegion.SizeGiB | Measure-Object -Sum).Sum
+                      $regionEc2GB = ($ec2InRegion.SizeGB | Measure-Object -Sum).Sum
+                      $regionEc2TiB = ($ec2InRegion.SizeTiB | Measure-Object -Sum).Sum
+                      $regionEc2TB = ($ec2InRegion.SizeTB | Measure-Object -Sum).Sum
+                      
+                      $ec2RegionalSummary += [PSCustomObject]@{
+                          "Region"       = $region
+                          "Count"        = $regionEc2Count
+                          "Total Size (GiB)" = $regionEc2GiB
+                          "Total Size (GB)"  = $regionEc2GB
+                          "Total Size (TiB)" = $regionEc2TiB
+                          "Total Size (TB)"  = $regionEc2TB
+                      }
+                  }
+              }
+
+              # Export EC2 Summary to Excel - both overall and regional breakdown
+              $ec2Summary | Export-Excel -Path $summaryXlsx -WorksheetName "EC2 Summary" -AutoSize -FreezeTopRow -BoldTopRow
+              
+              # Add regional breakdown after the summary (on same sheet)
+              if ($ec2RegionalSummary.Count -gt 0) {
+                  $ec2RegionalSummary | Export-Excel -Path $summaryXlsx -WorksheetName "EC2 Summary" -AutoSize -FreezeTopRow -BoldTopRow -StartRow 4
+              }
+
+              #---------- S3 SUMMARY SECTION ----------
+              # S3 Overall Summary
+              $s3Summary = [PSCustomObject]@{
+                  "ResourceType" = "S3 Buckets"
+                  "Region"       = "All"
+                  "Count"        = $s3TotalCount
+                  "Total Size (GiB)" = [math]::Round($s3TotalGiB, 3)
+                  "Total Size (GB)"  = [math]::Round($s3TotalGB, 3)
+                  "Total Size (TiB)" = [math]::Round($s3TotalTiB, 4)
+                  "Total Size (TB)"  = [math]::Round($s3TotalTB, 4)
+              }
+
+              # S3 Regional Breakdown
+              $s3RegionalSummary = @()
+              foreach ($region in $allRegions) {
+                  $s3InRegion = $s3List | Where-Object Region -eq $region
+                  $regionS3Count = ($s3InRegion | Measure-Object).Count
+                  
+                  if ($regionS3Count -gt 0) {
+                      # Calculate total S3 size in all units for this region
+                      $regionS3GiB = 0
+                      $regionS3GB = 0
+                      $regionS3TiB = 0
+                      $regionS3TB = 0
+                      
+                      if ($s3InRegion -and ($s3InRegion | Measure-Object).Count -gt 0) {
+                          # Find all size properties by examining property names
+                          $giBProperties = $s3InRegion[0].PSObject.Properties.Name | Where-Object { $_ -like '*_SizeGiB' }
+                          $gbProperties = $s3InRegion[0].PSObject.Properties.Name | Where-Object { $_ -like '*_SizeGB' }
+                          $tiBProperties = $s3InRegion[0].PSObject.Properties.Name | Where-Object { $_ -like '*_SizeTiB' }
+                          $tbProperties = $s3InRegion[0].PSObject.Properties.Name | Where-Object { $_ -like '*_SizeTB' }
+                          
+                          # Sum all the GiB sizes
+                          foreach ($propName in $giBProperties) {
+                              $s3InRegion | ForEach-Object {
+                                  if ($_.$propName) {
+                                      $regionS3GiB += $_.$propName
+                                  }
+                              }
+                          }
+                          
+                          # Sum all the GB sizes
+                          foreach ($propName in $gbProperties) {
+                              $s3InRegion | ForEach-Object {
+                                  if ($_.$propName) {
+                                      $regionS3GB += $_.$propName
+                                  }
+                              }
+                          }
+                          
+                          # Sum all the TiB sizes
+                          foreach ($propName in $tiBProperties) {
+                              $s3InRegion | ForEach-Object {
+                                  if ($_.$propName) {
+                                      $regionS3TiB += $_.$propName
+                                  }
+                              }
+                          }
+                          
+                          # Sum all the TB sizes
+                          foreach ($propName in $tbProperties) {
+                              $s3InRegion | ForEach-Object {
+                                  if ($_.$propName) {
+                                      $regionS3TB += $_.$propName
+                                  }
+                              }
+                          }
+                      }
+                      
+                      $s3RegionalSummary += [PSCustomObject]@{
+                          "Region"           = $region
+                          "Count"            = $regionS3Count
+                          "Total Size (GiB)" = [math]::Round($regionS3GiB, 3)
+                          "Total Size (GB)"  = [math]::Round($regionS3GB, 3)
+                          "Total Size (TiB)" = [math]::Round($regionS3TiB, 4)
+                          "Total Size (TB)"  = [math]::Round($regionS3TB, 4)
+                      }
+                  }
+              }
+
+              # Export S3 Summary to Excel - both overall and regional breakdown
+              $s3Summary | Export-Excel -Path $summaryXlsx -WorksheetName "S3 Summary" -AutoSize -FreezeTopRow -BoldTopRow
+              
+              # Add regional breakdown after the summary (on same sheet)
+              if ($s3RegionalSummary.Count -gt 0) {
+                  $s3RegionalSummary | Export-Excel -Path $summaryXlsx -WorksheetName "S3 Summary" -AutoSize -FreezeTopRow -BoldTopRow -StartRow 4
+              }
+
+              # Add detailed resource information worksheets
+              if ($ec2List.Count -gt 0) {
+                  $ec2List | Export-Excel -Path $summaryXlsx -WorksheetName "EC2 Details" -AutoSize -FreezeTopRow -BoldTopRow
+              }
+              
+              if ($s3List.Count -gt 0) {
+                  $s3List | Export-Excel -Path $summaryXlsx -WorksheetName "S3 Details" -AutoSize -FreezeTopRow -BoldTopRow
+              }
+
+              # Add unattached volumes worksheet if applicable
+              if ($ec2UnattachedVolList.Count -gt 0) {
+                  $ec2UnattachedVolList | Export-Excel -Path $summaryXlsx -WorksheetName "Unattached Volumes" -AutoSize -FreezeTopRow -BoldTopRow
+              }
+
+              Write-Host "Excel summary for account ${accountId}: ${summaryXlsx}" -ForegroundColor Green
+              
+              # Add to list of output files
+              $allOutputFiles.Add($summaryXlsx) | Out-Null
           }
-        }
 
-        $ec2TotalTiB = ($ec2List.SizeTiB | Measure-Object -Sum).Sum
-        $ec2UnVolTotalTiB = ($ec2UnattachedVolList.SizeTiB | Measure-Object -Sum).Sum
-
-        # Create summary KPI sheet with key metrics
-        $kpi = [PSCustomObject]@{
-          RunTimestamp              = (Get-Date).ToString('u')
-          AccountId                 = $accountId
-          AccountAlias              = $accountAlias
-          EC2_Instances             = $ec2List.Count
-          EC2_Attached_Volumes      = (($ec2List.Volumes | Measure-Object -Sum).Sum)
-          EC2_Attached_Total_TiB    = [math]::Round($ec2TotalTiB,4)
-          EC2_Unattached_Volumes    = $ec2UnattachedVolList.Count
-          EC2_Unattached_Total_TiB  = [math]::Round($ec2UnVolTotalTiB,4)
-          S3_Buckets                = $s3List.Count
-          S3_Total_TiB              = [math]::Round($totalS3TiB,4)
-          UnattachedPct_of_Attached = $( if ($ec2TotalTiB -gt 0) { [math]::Round(($ec2UnVolTotalTiB / $ec2TotalTiB)*100,2) } else { 0 } )
-        }
-        $kpi | Export-Excel -Path $summaryXlsx -WorksheetName 'Summary' -AutoSize -BoldTopRow
-
-        $allOutputFiles.Add($summaryXlsx) | Out-Null
-        Write-Host "Excel summary for account ${accountId}: ${summaryXlsx}" -ForegroundColor Green
+          # Create combined Excel summary if multiple accounts processed
+          if ($accountsProcessed.Count -gt 1) {
+              $combinedSummaryXlsx = "combined_summary_$date_string.xlsx"
+              if (Test-Path $combinedSummaryXlsx) { Remove-Item $combinedSummaryXlsx -Force }
+              
+              # Combine all EC2 instances
+              $combinedEc2List = [System.Collections.ArrayList]::new()
+              foreach ($acctInfo in $accountsProcessed) {
+                  $accountId = $acctInfo.AccountId
+                  if ($ec2ListByAccount.ContainsKey($accountId)) {
+                      foreach ($item in $ec2ListByAccount[$accountId]) {
+                          $combinedEc2List.Add($item) | Out-Null
+                      }
+                  }
+              }
+              
+              # Combine all unattached volumes
+              $combinedEc2UnattachedVolList = [System.Collections.ArrayList]::new()
+              foreach ($acctInfo in $accountsProcessed) {
+                  $accountId = $acctInfo.AccountId
+                  if ($ec2UnattachedVolListByAccount.ContainsKey($accountId)) {
+                      foreach ($item in $ec2UnattachedVolListByAccount[$accountId]) {
+                          $combinedEc2UnattachedVolList.Add($item) | Out-Null
+                      }
+                  }
+              }
+              
+              # Combined S3 buckets
+              $combinedS3List = [System.Collections.ArrayList]::new()
+              foreach ($acctInfo in $accountsProcessed) {
+                  $accountId = $acctInfo.AccountId
+                  if ($s3ListByAccount.ContainsKey($accountId)) {
+                      foreach ($item in $s3ListByAccount[$accountId]) {
+                          $combinedS3List.Add($item) | Out-Null
+                      }
+                  }
+              }
+              
+              # Export all combined data to Excel
+              if ($combinedEc2List.Count -gt 0) {
+                  addTagsToAllObjectsInList $combinedEc2List
+                  $combinedEc2List | Export-Excel -Path $combinedSummaryXlsx -WorksheetName "EC2 Instances" -AutoSize -FreezeTopRow -BoldTopRow
+              }
+              
+              if ($combinedEc2UnattachedVolList.Count -gt 0) {
+                  addTagsToAllObjectsInList $combinedEc2UnattachedVolList
+                  $combinedEc2UnattachedVolList | Export-Excel -Path $combinedSummaryXlsx -WorksheetName "Unattached Volumes" -AutoSize -FreezeTopRow -BoldTopRow
+              }
+              
+              if ($combinedS3List.Count -gt 0) {
+                  $combinedS3List | Export-Excel -Path $combinedSummaryXlsx -WorksheetName "S3 Buckets" -AutoSize -FreezeTopRow -BoldTopRow
+              }
+              
+              Write-Host "Combined Excel summary: $combinedSummaryXlsx" -ForegroundColor Green
+              $allOutputFiles.Add($combinedSummaryXlsx) | Out-Null
+          }
+      } else {
+          Write-Host "ImportExcel module not installed; skipping Excel summary." -ForegroundColor Yellow
       }
-      
-      # Create combined Excel summary if multiple accounts processed
-      if ($accountsProcessed.Count -gt 1) {
-        $combinedSummaryXlsx = "combined_accounts_$date_string.xlsx"
-        if (Test-Path $combinedSummaryXlsx) { Remove-Item $combinedSummaryXlsx -Force }
-        
-        $combinedKpi = [System.Collections.ArrayList]::new()
-        foreach ($acctInfo in $accountsProcessed) {
-          $accountId = $acctInfo.AccountId
-          $accountAlias = $acctInfo.AccountAlias
-          
-          $ec2List = $ec2ListByAccount[$accountId]
-          $ec2UnattachedVolList = $ec2UnattachedVolListByAccount[$accountId]
-          $s3List = $s3ListByAccount[$accountId]
-          
-          $totalS3TiB = 0
-          if ($s3List.Count -gt 0) {
-            ($s3List | Get-Member -MemberType NoteProperty | Where-Object Name -like "*_SizeTiB") | ForEach-Object {
-              $totalS3TiB += (($s3List.$($_.Name) | Measure-Object -Sum).Sum)
-            }
-          }
-          
-          $ec2TotalTiB = ($ec2List.SizeTiB | Measure-Object -Sum).Sum
-          $ec2UnVolTotalTiB = ($ec2UnattachedVolList.SizeTiB | Measure-Object -Sum).Sum
-          
-          $kpi = [PSCustomObject]@{
-            AccountId                 = $accountId
-            AccountAlias              = $accountAlias
-            EC2_Instances             = $ec2List.Count
-            EC2_Attached_Volumes      = (($ec2List.Volumes | Measure-Object -Sum).Sum)
-            EC2_Attached_Total_TiB    = [math]::Round($ec2TotalTiB,4)
-            EC2_Unattached_Volumes    = $ec2UnattachedVolList.Count
-            EC2_Unattached_Total_TiB  = [math]::Round($ec2UnVolTotalTiB,4)
-            S3_Buckets                = $s3List.Count
-            S3_Total_TiB              = [math]::Round($totalS3TiB,4)
-            UnattachedPct_of_Attached = $( if ($ec2TotalTiB -gt 0) { [math]::Round(($ec2UnVolTotalTiB / $ec2TotalTiB)*100,2) } else { 0 } )
-          }
-          $combinedKpi.Add($kpi) | Out-Null
-        }
-        
-        $combinedKpi | Export-Excel -Path $combinedSummaryXlsx -WorksheetName 'AccountSummaries' -AutoSize -FreezeTopRow -BoldTopRow
-        $allOutputFiles.Add($combinedSummaryXlsx) | Out-Null
-        Write-Host "Combined Excel summary: ${combinedSummaryXlsx}" -ForegroundColor Green
-      }
-    } else {
-      Write-Host "ImportExcel module not installed; skipping Excel summary." -ForegroundColor Yellow
-    }
   } catch {
-    Write-Host "Excel summary creation failed: $_" -ForegroundColor Yellow
+      Write-Host "Excel summary creation failed: $_" -ForegroundColor Yellow
   }
-
-  # Display information about S3 tag case sensitivity
-  Write-Host "NOTE: S3 tag keys differing only by case are distinct; standardize for consistency." -ForegroundColor Yellow
 
 } catch {
   # Handle any unhandled exceptions
@@ -1085,8 +1258,7 @@ if ($existingFiles.Count -gt 0) {
   Write-Host "No output files to archive." -ForegroundColor Yellow
 }
 
-# Restore original culture settings
 [System.Threading.Thread]::CurrentThread.CurrentCulture = $CurrentCulture
 [System.Threading.Thread]::CurrentThread.CurrentUICulture = $CurrentCulture
-Write-Host "Inventory complete. Results in $archiveFile." -ForegroundColor Cyan
+Write-Host "`nInventory complete. Results in $archiveFile." -ForegroundColor Cyan
 Write-Host "All output files have been compressed into the ZIP archive." -ForegroundColor Cyan
