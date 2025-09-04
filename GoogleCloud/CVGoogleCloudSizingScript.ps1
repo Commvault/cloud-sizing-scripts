@@ -149,7 +149,8 @@ function Get-GcpProjects {
     }
 }
 
-function Parse-RegionFromZone([string]$zone) {
+function Get-RegionFromZone {
+    param([string]$zone)
     if (-not $zone) { return "Unknown" }
     $z = $zone -replace '.*/',''
     return ($z -replace '-[a-z]$','')
@@ -264,18 +265,21 @@ function Get-GcpVMInventory {
         -Status "VM $vmCount/$($vmList.Count) ($vmPercent%): $($vm.name)" `
         -PercentComplete $vmPercent
 
-            # Inner per-VM workload progress (3 steps)
+            # Inner per-VM workload progress (3 steps) - reset per VM
             $vmWorkTotal = 3
             $vmWorkStep = 0
-            function Update-VMWorkProgress([string]$phase){
-                $script:vmWorkStep++
-                $pct = [math]::Round(($script:vmWorkStep / $vmWorkTotal) * 100,1)
-                Write-Progress -Id 21 -ParentId 2 -Activity "VM Workload" -Status ("{0} ({1}/{2})" -f $phase,$script:vmWorkStep,$vmWorkTotal) -PercentComplete $pct
+            function Update-VMWorkProgress {
+                param([string]$Phase,[int]$Current,[int]$Total)
+                if ($Total -le 0) { $Total = 1 }
+                $pctRaw = ($Current / $Total) * 100
+                if ($pctRaw -gt 100) { $pctRaw = 100 }
+                $pct = [math]::Round($pctRaw,0)
+                Write-Progress -Id 21 -ParentId 2 -Activity "VM Workload" -Status ("{0} ({1}/{2})" -f $Phase,$Current,$Total) -PercentComplete $pct
             }
-            Update-VMWorkProgress -phase "Detecting OS"
+            $vmWorkStep++; Update-VMWorkProgress -Phase "Detecting OS" -Current $vmWorkStep -Total $vmWorkTotal
 
             $zone = ($vm.zone -replace '.*/','')
-            $region = Parse-RegionFromZone $vm.zone
+            $region = Get-RegionFromZone -zone $vm.zone
 
             # OS detection (improved): check disk licenses first (fast, in list output), then labels.
             $osType = "Linux"
@@ -297,7 +301,7 @@ function Get-GcpVMInventory {
             } catch { $osType = 'Linux' }
 
             # Sum attached disk sizes via diskMap
-            Update-VMWorkProgress -phase "Aggregating Disks"
+            $vmWorkStep++; Update-VMWorkProgress -Phase "Aggregating Disks" -Current $vmWorkStep -Total $vmWorkTotal
             $vmDiskGB = 0
             if ($vm.disks) {
                 foreach ($disk in $vm.disks) {
@@ -312,7 +316,7 @@ function Get-GcpVMInventory {
                             DiskName   = $d.name
                             VMName     = $vm.name
                             Project    = $proj
-                            Region     = if ($d.region) { ($d.region -split '/')[-1] } else { Parse-RegionFromZone $d.zone }
+                            Region     = if ($d.region) { ($d.region -split '/')[-1] } else { (Get-RegionFromZone -zone $d.zone) }
                             Zone       = if ($d.region) { "" } else { ($d.zone -split '/')[-1] }
                             IsRegional = [bool]$isRegional
                             Encrypted  = if ($d.diskEncryptionKey -or $d.encryptionKey) { 'Yes' } else { 'No' }
@@ -328,7 +332,7 @@ function Get-GcpVMInventory {
             # Per-VM log line for transcript (fast, no extra gcloud calls)
             Write-Host ("[VM] {0} | {1}/{2} ({3}%) | Name={4} | Type={5} | Region={6} | Zone={7} | Disks={8} | DiskGB={9}" -f $proj, $vmCount, $vmList.Count, $vmPercent, $vm.name, ($vm.machineType -replace '.*/',''), $region, $zone, $diskCount, $vmDiskGB) -ForegroundColor DarkCyan
 
-            Update-VMWorkProgress -phase "Recording VM"
+            $vmWorkStep++; Update-VMWorkProgress -Phase "Recording VM" -Current $vmWorkStep -Total $vmWorkTotal
             $VMs += [PSCustomObject]@{
                 Project      = $proj
                 VMName       = $vm.name
@@ -353,7 +357,7 @@ function Get-GcpVMInventory {
                 DiskName   = $disk.name
                 VMName     = if ($disk.users -and $disk.users.Count -gt 0) { ($disk.users | ForEach-Object { ($_ -split '/')[-1] }) -join ',' } else { $null }
                 Project    = $proj
-                Region     = if ($disk.region) { ($disk.region -split '/')[-1] } else { Parse-RegionFromZone $disk.zone }
+                Region     = if ($disk.region) { ($disk.region -split '/')[-1] } else { (Get-RegionFromZone -zone $disk.zone) }
                 Zone       = if ($disk.region) { "" } else { ($disk.zone -split '/')[-1] }
                 IsRegional = [bool]$isRegional
                 Encrypted  = if ($disk.diskEncryptionKey -or $disk.encryptionKey) { 'Yes' } else { 'No' }
@@ -412,15 +416,18 @@ function Get-GcpStorageInventory {
                 -Status "Bucket $bCount of ${bTotal}: $($bucket.name)" `
                 -PercentComplete $percent
 
-            # Inner per-bucket workload progress (3 steps)
+            # Inner per-bucket workload progress (3 steps) - reset per bucket
             $bucketWorkTotal = 3
             $bucketWorkStep = 0
-            function Update-BucketWorkProgress([string]$phase){
-                $script:bucketWorkStep++
-                $pct = [math]::Round(($script:bucketWorkStep / $bucketWorkTotal) * 100,1)
-                Write-Progress -Id 41 -ParentId 4 -Activity "Bucket Workload" -Status ("{0} ({1}/{2})" -f $phase,$script:bucketWorkStep,$bucketWorkTotal) -PercentComplete $pct
+            function Update-BucketWorkProgress {
+                param([string]$Phase,[int]$Current,[int]$Total)
+                if ($Total -le 0) { $Total = 1 }
+                $pctRaw = ($Current / $Total) * 100
+                if ($pctRaw -gt 100) { $pctRaw = 100 }
+                $pct = [math]::Round($pctRaw,0)
+                Write-Progress -Id 41 -ParentId 4 -Activity "Bucket Workload" -Status ("{0} ({1}/{2})" -f $Phase,$Current,$Total) -PercentComplete $pct
             }
-            Update-BucketWorkProgress -phase "Measuring Size"
+            $bucketWorkStep++; Update-BucketWorkProgress -Phase "Measuring Size" -Current $bucketWorkStep -Total $bucketWorkTotal
 
             $sizeBytes = Get-BucketSizeBytes -BucketName $bucket.name -Project $proj
 
@@ -440,7 +447,7 @@ function Get-GcpStorageInventory {
             $sizeGBDec   = if ($bytes -gt 0) { [math]::Round($bytes / $GBDecimalDivisor, 4) } else { 0 }
             $sizeTBDec   = if ($bytes -gt 0) { [math]::Round($bytes / $TBDecimalDivisor, 6) } else { 0 }
 
-            Update-BucketWorkProgress -phase "Recording Bucket"
+            $bucketWorkStep++; Update-BucketWorkProgress -Phase "Recording Bucket" -Current $bucketWorkStep -Total $bucketWorkTotal
             $StorageBuckets += [PSCustomObject]@{
                 StorageBucket       = $bucket.name
                 Project             = $proj
@@ -457,7 +464,7 @@ function Get-GcpStorageInventory {
 
             Write-Host ("[BUCKET] {0} | {1}/{2} ({3}%) | Name={4} | Loc={5} | Class={6} | Bytes={7} | GiB={8} | GB(dec)={9}" -f $proj,$bCount,$bTotal,$percent,$bucket.name,$bucket.location,$bucket.storageClass,$bytes,$sizeGiB,$sizeGBDec) -ForegroundColor DarkGreen
             Write-Log "Collected bucket: $($bucket.name) in ${proj}, bytes: $bytes, sizeGiB: $sizeGiB, sizeGB(dec): $sizeGBDec"
-            Update-BucketWorkProgress -phase "Completed"
+            $bucketWorkStep++; Update-BucketWorkProgress -Phase "Completed" -Current $bucketWorkStep -Total $bucketWorkTotal
             Write-Progress -Id 41 -Activity "Bucket Workload" -Completed
         }
 
@@ -518,7 +525,7 @@ function Write-PlainCsv {
 # -------------------------
 function Add-BlankLines([string]$Path,[int]$Count=4){ 1..$Count | ForEach-Object { Add-Content -Path $Path -Value '' } }
 
-function Append-VmInfoSummary {
+function Add-VmInfoSummary {
     param([string]$Path,[object[]]$VmData)
     if (-not $VmData -or $VmData.Count -eq 0) { return }
     Add-BlankLines -Path $Path -Count 4
@@ -542,7 +549,7 @@ function Append-VmInfoSummary {
     }
 }
 
-function Append-DiskSummary {
+function Add-DiskSummary {
     param([string]$Path,[object[]]$DiskData,[string]$Title)
     if (-not $DiskData -or $DiskData.Count -eq 0) { return }
     Add-BlankLines -Path $Path -Count 4
@@ -569,7 +576,7 @@ function Append-DiskSummary {
     }
 }
 
-function Append-BucketSummary {
+function Add-BucketSummary {
     param([string]$Path,[object[]]$Buckets)
     if (-not $Buckets -or $Buckets.Count -eq 0) { return }
     Add-BlankLines -Path $Path -Count 4
@@ -603,20 +610,20 @@ if ($Selected.VM -and $invResults.VMs -and $invResults.VMs.Count) {
     $vmCsv = Join-Path $outDir ("gcp_vm_info_" + $dateStr + ".csv")
     Write-PlainCsv -Data $invResults.VMs -Path $vmCsv
     Write-Host "VMs CSV written: $(Split-Path $vmCsv -Leaf)" -ForegroundColor Cyan
-    Append-VmInfoSummary -Path $vmCsv -VmData $invResults.VMs
+    Add-VmInfoSummary -Path $vmCsv -VmData $invResults.VMs
 
     if ($invResults.AttachedDisks -and $invResults.AttachedDisks.Count) {
         $attachedCsv = Join-Path $outDir ("gcp_disks_attached_to_vms_" + $dateStr + ".csv")
         Write-PlainCsv -Data $invResults.AttachedDisks -Path $attachedCsv
         Write-Host "Attached disks CSV written: $(Split-Path $attachedCsv -Leaf)" -ForegroundColor Cyan
-    Append-DiskSummary -Path $attachedCsv -DiskData $invResults.AttachedDisks -Title 'Attached Disks'
+    Add-DiskSummary -Path $attachedCsv -DiskData $invResults.AttachedDisks -Title 'Attached Disks'
     }
 
     if ($invResults.UnattachedDisks -and $invResults.UnattachedDisks.Count) {
         $unattachedCsv = Join-Path $outDir ("gcp_disks_unattached_to_vms_" + $dateStr + ".csv")
         Write-PlainCsv -Data $invResults.UnattachedDisks -Path $unattachedCsv
         Write-Host "Unattached disks CSV written: $(Split-Path $unattachedCsv -Leaf)" -ForegroundColor Cyan
-    Append-DiskSummary -Path $unattachedCsv -DiskData $invResults.UnattachedDisks -Title 'Unattached Disks'
+    Add-DiskSummary -Path $unattachedCsv -DiskData $invResults.UnattachedDisks -Title 'Unattached Disks'
     }
 }
 
@@ -624,7 +631,7 @@ if ($Selected.STORAGE -and $invResults.StorageBuckets -and $invResults.StorageBu
     $bktCsv = Join-Path $outDir ("gcp_storage_buckets_info_" + $dateStr + ".csv")
     Write-PlainCsv -Data $invResults.StorageBuckets -Path $bktCsv
     Write-Host "Buckets CSV written: $(Split-Path $bktCsv -Leaf)" -ForegroundColor Cyan
-    Append-BucketSummary -Path $bktCsv -Buckets $invResults.StorageBuckets
+    Add-BucketSummary -Path $bktCsv -Buckets $invResults.StorageBuckets
 }
 
 # -------------------------
