@@ -32,6 +32,65 @@
     Must be run by a user with appropriate GCP permissions.
 #>
 
+
+<#
+SETUP INSTRUCTIONS FOR GOOGLE CLOUD SHELL (Recommended):
+
+1. Learn about Google Cloud Shell:
+    Visit: https://cloud.google.com/shell/docs
+
+2. Verify GCP permissions:
+    Ensure your Google account has "Viewer" or higher role on target projects.
+
+3. Access Google Cloud Shell:
+    - Login to Google Cloud Console with your account
+    - Open Google Cloud Shell
+
+4. Upload this script:
+    Use the Cloud Shell file upload feature to upload CVGoogleCloudSizingScript.ps1
+
+5. Run the script:
+    ./CVGoogleCloudSizingScript.ps1
+    ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+    ./CVGoogleCloudSizingScript.ps1 -Projects "my-gcp-project-1","my-gcp-project-2"
+
+SETUP INSTRUCTIONS FOR LOCAL SYSTEM:
+
+1. Install PowerShell 7:
+    Download from: https://github.com/PowerShell/PowerShell/releases
+
+2. Install Google Cloud SDK:
+    Download from: https://cloud.google.com/sdk/docs/install
+
+3. Authenticate with GCP:
+    gcloud auth login
+
+4. Verify permissions:
+    Ensure your account has "Viewer" or higher role on target projects
+
+5. Run the script:
+    .\CVGoogleCloudSizingScript.ps1
+    .\CVGoogleCloudSizingScript.ps1 -Types VM
+    .\CVGoogleCloudSizingScript.ps1 -Projects "my-gcp-project"
+
+EXAMPLE USAGE
+-------------
+     .\CVGoogleCloudSizingScript.ps1
+     # Inventories VMs and Storage Buckets in all accessible projects
+
+     .\CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+     # Explicitly inventories VMs and Storage Buckets in all projects (same as default)
+
+     .\CVGoogleCloudSizingScript.ps1 -Types VM
+     # Only inventories Compute Engine VMs in all projects
+
+     .\CVGoogleCloudSizingScript.ps1 -Projects "my-gcp-project-1","my-gcp-project-2"
+     # Inventories VMs and Storage Buckets in only the specified projects
+
+     .\CVGoogleCloudSizingScript.ps1 -Types Storage -Projects "my-gcp-project-1"
+     # Only inventories Storage Buckets in the specified project
+#>
+
 param(
     [ValidateSet("VM","Storage", IgnoreCase=$true)]
     [string[]]$Types,
@@ -52,18 +111,27 @@ Write-Host "=== GCP Resource Inventory Started ===" -ForegroundColor Green
 if ($Types)    { Write-Host "  Types: $($Types -join ', ')" -ForegroundColor Green }
 if ($Projects) { Write-Host "  Projects: $($Projects -join ', ')" -ForegroundColor Green }
 
-# -------------------------
-# Type selection
-# -------------------------
-$selectedTypes = @{ VM = $true; Storage = $true }
+
+# Resource type mapping
+$ResourceTypeMap = @{
+    "VM"      = "VMs"
+    "STORAGE" = "StorageBuckets"
+}
+
+# Normalize types
 if ($Types) {
-    $selectedTypes = @{ VM = $false; Storage = $false }
+    $Types = $Types | ForEach-Object { $_.Trim().ToUpper() }
+    $Selected = @{}
     foreach ($t in $Types) {
-        switch ($t.ToUpperInvariant()) {
-            "VM"      { $selectedTypes.VM = $true }
-            "STORAGE" { $selectedTypes.Storage = $true }
-        }
+        if ($ResourceTypeMap.ContainsKey($t)) { $Selected[$t] = $true }
     }
+    if ($Selected.Count -eq 0) {
+        Write-Host "No valid -Types specified. Use: VM, Storage"
+        exit 1
+    }
+} else {
+    $Selected = @{}
+    $ResourceTypeMap.Keys | ForEach-Object { $Selected[$_] = $true }
 }
 
 # -------------------------
@@ -318,29 +386,34 @@ if ($Projects) {
 Write-Host "Targeting $($targetProjects.Count) projects." -ForegroundColor Green
 
 $invResults = @{}
-if ($selectedTypes.VM)      { $invResults = Get-GcpVMInventory -ProjectIds $targetProjects }
-if ($selectedTypes.Storage) { $invResults.StorageBuckets = Get-GcpStorageInventory -ProjectIds $targetProjects }
+if ($Selected.VM)      { $invResults = Get-GcpVMInventory -ProjectIds $targetProjects }
+if ($Selected.STORAGE) { $invResults.StorageBuckets = Get-GcpStorageInventory -ProjectIds $targetProjects }
 
 # -------------------------
 # Output CSVs
 # -------------------------
 Write-Progress -Id 5 -Activity "Generating Output Files" -Status "Exporting CSV files..." -PercentComplete 0
 
-if ($selectedTypes.VM -and $invResults.VMs -and $invResults.VMs.Count) {
+# Always generate all VM-related CSVs if VM inventory is selected and data exists
+if ($Selected.VM -and $invResults.VMs -and $invResults.VMs.Count) {
     $vmCsv = Join-Path $outDir ("gcp_vm_info_" + $dateStr + ".csv")
     $invResults.VMs | Export-Csv $vmCsv -NoTypeInformation
     Write-Host "VMs CSV written: $(Split-Path $vmCsv -Leaf)" -ForegroundColor Cyan
 
-    $attachedCsv = Join-Path $outDir ("gcp_disks_attached_to_vms_" + $dateStr + ".csv")
-    $invResults.AttachedDisks | Export-Csv $attachedCsv -NoTypeInformation
-    Write-Host "Attached disks CSV written: $(Split-Path $attachedCsv -Leaf)" -ForegroundColor Cyan
+    if ($invResults.AttachedDisks -and $invResults.AttachedDisks.Count) {
+        $attachedCsv = Join-Path $outDir ("gcp_disks_attached_to_vms_" + $dateStr + ".csv")
+        $invResults.AttachedDisks | Export-Csv $attachedCsv -NoTypeInformation
+        Write-Host "Attached disks CSV written: $(Split-Path $attachedCsv -Leaf)" -ForegroundColor Cyan
+    }
 
-    $unattachedCsv = Join-Path $outDir ("gcp_disks_unattached_to_vms_" + $dateStr + ".csv")
-    $invResults.UnattachedDisks | Export-Csv $unattachedCsv -NoTypeInformation
-    Write-Host "Unattached disks CSV written: $(Split-Path $unattachedCsv -Leaf)" -ForegroundColor Cyan
+    if ($invResults.UnattachedDisks -and $invResults.UnattachedDisks.Count) {
+        $unattachedCsv = Join-Path $outDir ("gcp_disks_unattached_to_vms_" + $dateStr + ".csv")
+        $invResults.UnattachedDisks | Export-Csv $unattachedCsv -NoTypeInformation
+        Write-Host "Unattached disks CSV written: $(Split-Path $unattachedCsv -Leaf)" -ForegroundColor Cyan
+    }
 }
 
-if ($selectedTypes.Storage -and $invResults.StorageBuckets -and $invResults.StorageBuckets.Count) {
+if ($Selected.STORAGE -and $invResults.StorageBuckets -and $invResults.StorageBuckets.Count) {
     $bktCsv = Join-Path $outDir ("gcp_storage_buckets_info_" + $dateStr + ".csv")
     $invResults.StorageBuckets | Export-Csv $bktCsv -NoTypeInformation
     Write-Host "Buckets CSV written: $(Split-Path $bktCsv -Leaf)" -ForegroundColor Cyan
@@ -364,11 +437,11 @@ $attached = $invResults.AttachedDisks
 $bucketData = $invResults.StorageBuckets
 
 # Overall rows
-if ($selectedTypes.VM -and $vmData) {
+if ($Selected.VM -and $vmData) {
     $overallDiskSizeGB = ($attached | Select-Object -Property DiskName,SizeGB -Unique | Measure-Object SizeGB -Sum).Sum
     $summaryRows += [PSCustomObject]@{Level='Overall';ResourceType='VM';Project='All';Region='All';Zone='All';Count=$vmData.Count;TotalSizeGB=[int64]$overallDiskSizeGB;TotalSizeTB=[math]::Round($overallDiskSizeGB/1e3,4);TotalSizeTiB=[math]::Round($overallDiskSizeGB/1024,4)}
 }
-if ($selectedTypes.Storage -and $bucketData) {
+if ($Selected.STORAGE -and $bucketData) {
     $overallBucketBytes = ($bucketData | Measure-Object UsedCapacityBytes -Sum).Sum
     $summaryRows += [PSCustomObject]@{Level='Overall';ResourceType='StorageBucket';Project='All';Region='All';Zone='All';Count=$bucketData.Count;TotalSizeGB=[math]::Round($overallBucketBytes/1e9,3);TotalSizeTB=[math]::Round($overallBucketBytes/1e12,4);TotalSizeTiB=[math]::Round(($overallBucketBytes/1GB)/1024,4)}
 }
@@ -377,7 +450,7 @@ if ($selectedTypes.Storage -and $bucketData) {
 1..4 | ForEach-Object { $summaryRows += (New-BlankSummaryRow) }
 
 # Project-level rows
-if ($selectedTypes.VM -and $vmData) {
+if ($Selected.VM -and $vmData) {
     foreach ($proj in $targetProjects) {
         $projVMs = $vmData | Where-Object Project -eq $proj
         if (-not $projVMs) { continue }
@@ -386,7 +459,7 @@ if ($selectedTypes.VM -and $vmData) {
         $summaryRows += [PSCustomObject]@{Level='Project';ResourceType='VM';Project=$proj;Region='All';Zone='All';Count=$projVMs.Count;TotalSizeGB=[int64]$projGB;TotalSizeTB=[math]::Round($projGB/1e3,4);TotalSizeTiB=[math]::Round($projGB/1024,4)}
     }
 }
-if ($selectedTypes.Storage -and $bucketData) {
+if ($Selected.STORAGE -and $bucketData) {
     foreach ($proj in $targetProjects) {
         $projBuckets = $bucketData | Where-Object Project -eq $proj
         if (-not $projBuckets) { continue }
@@ -399,11 +472,14 @@ if ($selectedTypes.Storage -and $bucketData) {
 1..4 | ForEach-Object { $summaryRows += (New-BlankSummaryRow) }
 
 # Per project region + zone breakdown (VMs only)
-if ($selectedTypes.VM -and $vmData) {
+if ($Selected.VM -and $vmData) {
     foreach ($proj in $targetProjects) {
         $projVMs = $vmData | Where-Object Project -eq $proj
         if (-not $projVMs) { continue }
-
+    
+    # Header row indicating upcoming region/zone breakdown for this project
+    $summaryRows += [PSCustomObject]@{Level="Per region/zone in project [$proj]";ResourceType='';Project='';Region='';Zone='';Count='';TotalSizeGB='';TotalSizeTB='';TotalSizeTiB=''}
+    
         # Regions
         $regionGroups = $projVMs | Group-Object Region | Sort-Object Name
         foreach ($rg in $regionGroups) {
