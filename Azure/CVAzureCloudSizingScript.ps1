@@ -1,6 +1,6 @@
 <#  
 .SYNOPSIS  
-    Azure Cloud Sizing Script - Comprehensive VM and Storage Account inventory and sizing analysis
+    Azure Cloud Sizing Script - Comprehensive inventory and sizing analysis
 .DESCRIPTION  
     Inventories Azure Virtual Machines and Storage Accounts across all or specified subscriptions.
     Calculates disk sizes for VMs and storage capacity utilization for Storage Accounts.
@@ -19,7 +19,7 @@
     
 .EXAMPLE  
     .\CVAzureCloudSizingScript.ps1  
-    # Inventories VMs and Storage Accounts in all accessible subscriptions  
+    # Inventories all resources in all accessible subscriptions  
 .EXAMPLE  
     .\CVAzureCloudSizingScript.ps1 -Types VM,Storage  
     # Explicitly inventories VMs and Storage Accounts in all subscriptions (same as default)
@@ -28,11 +28,20 @@
     # Only inventories Virtual Machines in all subscriptions
 .EXAMPLE  
     .\CVAzureCloudSizingScript.ps1 -Subscriptions "Production","Development"  
-    # Inventories VMs and Storage Accounts in only the Production and Development subscriptions
+    # Inventories all resources in only the Production and Development subscriptions
+
 .EXAMPLE  
-    .\CVAzureCloudSizingScript.ps1 -Types Storage -Subscriptions "Production"  
-    # Only inventories Storage Accounts in the Production subscription  
-    
+    .\CVAzureCloudSizingScript.ps1 -Subscriptions Production,Development
+    # Inventories all resources in the subscriptions Production and Development
+
+.EXAMPLE  
+    .\CVAzureCloudSizingScript.ps1 -Types Storage -Subscriptions Production  
+    # Inventories all Storage Accounts in only the Production subscription
+
+.EXAMPLE  
+    .\CVAzureCloudSizingScript.ps1 -Subscriptions xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    # Inventories all resources in the subscription with the specified Subscription ID
+
 .OUTPUTS
     Creates timestamped output directory with the following files:
     - azure_vm_info_YYYY-MM-DD_HHMMSS.csv - VM inventory with disk sizing
@@ -67,6 +76,7 @@
        ./CVAzureCloudSizingScript.ps1
        ./CVAzureCloudSizingScript.ps1 -Types VM,Storage
        ./CVAzureCloudSizingScript.ps1 -Subscriptions "Production","Development"
+       ./CVAzureCloudSizingScript.ps1 -Subscriptions Production,Development -Types VM,Storage
 
     SETUP INSTRUCTIONS FOR LOCAL SYSTEM:
 
@@ -256,8 +266,7 @@ foreach ($sub in $subs) {
                     VMName         = $vm.Name  
                     VMSize         = $vm.HardwareProfile.VmSize  
                     OS             = $vm.StorageProfile.OsDisk.OsType  
-                    Region         = $vm.Location  
-                    VMId           = $vm.VMID
+                    Region         = $vm.Location
                     DiskCount      = $diskCount
                     VMDiskSizeGB   = $totalDiskSizeGB  
                 }  
@@ -354,9 +363,10 @@ if ($Selected.STORAGE -and $StorageAccounts.Count) {
 $summaryRows = @()  
 
 # Add overall resource type counts first
-foreach ($k in $ResourceTypeMap.Keys) {  
+foreach ($k in $ResourceTypeMap.Keys) { 
     if ($Selected[$k]) {  
         # Calculate total disk size for VMs or storage capacity for Storage Accounts
+        $Subscription = "All"
         $ResourceType = ""
         $totalSize = 0
         $totalSizeTB = 0
@@ -371,7 +381,9 @@ foreach ($k in $ResourceTypeMap.Keys) {
             $totalSizeTB = [math]::Round($totalSize / 1000, 4)
             $totalSizeTiB = [math]::Round($totalSize / 1024, 4)
         } elseif ($k -eq "STORAGE" -and $StorageAccounts.Count -gt 0) {
-            $ResourceType = "Storage Account"
+            $totalBlobCount = ($StorageAccounts | Measure-Object -Property BlobCount -Sum).Sum
+            if ($totalBlobCount -eq $null) { $totalBlobCount = 0 }
+            $ResourceType = "Storage Account (Total Blobs: $totalBlobCount)"
             $count = $StorageAccounts.Count
             $totalCapacityBytes = ($StorageAccounts | Measure-Object -Property UsedCapacityBytes -Sum).Sum
             if ($totalCapacityBytes -eq $null) { $totalCapacityBytes = 0 }
@@ -383,6 +395,7 @@ foreach ($k in $ResourceTypeMap.Keys) {
         # Only add summary row if we have resources of this type
         if ($count -gt 0) {
             $summaryRows += [PSCustomObject]@{ 
+                Subscription = $Subscription
                 ResourceType = $ResourceType
                 Region = "All"
                 Count = $count
@@ -396,6 +409,7 @@ foreach ($k in $ResourceTypeMap.Keys) {
 
 # Add gap after overall totals
 $summaryRows += [PSCustomObject]@{ 
+    Subscription = ""
     ResourceType = ""
     Region = ""
     Count = ""
@@ -407,14 +421,6 @@ $summaryRows += [PSCustomObject]@{
 # Add VM regional breakdown
 if ($VMs.Count -and $Selected.VM) {
     # Add VM header with bracket formatting like Excel example
-    $summaryRows += [PSCustomObject]@{ 
-        ResourceType = "[ Azure VMs ]"
-        Region = $null
-        Count = $null
-        TotalSizeGB = $null
-        TotalSizeTB = $null
-        TotalSizeTiB = $null
-    }
     
     $vmRegionalSummary = $VMs | Group-Object Region | ForEach-Object {
         $totalDiskSize = ($_.Group | Measure-Object -Property VMDiskSizeGB -Sum).Sum
@@ -422,7 +428,8 @@ if ($VMs.Count -and $Selected.VM) {
         $totalDiskSizeTB = [math]::Round($totalDiskSize / 1000, 4)
         $totalDiskSizeTiB = [math]::Round($totalDiskSize / 1024, 4)
         [PSCustomObject]@{
-            ResourceType = ""
+            Subscription = "All"
+            ResourceType = "VM"
             Region = $_.Name
             Count = $_.Count
             TotalSizeGB = $totalDiskSize
@@ -433,37 +440,22 @@ if ($VMs.Count -and $Selected.VM) {
     
     $summaryRows += $vmRegionalSummary
     
-    # Add gap after VM section
-    $summaryRows += [PSCustomObject]@{ 
-        ResourceType = ""
-        Region = $null
-        Count = $null
-        TotalSizeGB = $null
-        TotalSizeTB = $null
-        TotalSizeTiB = $null
-    }
 }
 
 # Add Storage Account regional breakdown if selected
 if ($StorageAccounts.Count -and $Selected.STORAGE) {
     # Add Storage header with bracket formatting like Excel example
-    $summaryRows += [PSCustomObject]@{ 
-        ResourceType = "[ Azure Storage Accounts ]"
-        Region = $null
-        Count = $null
-        TotalSizeGB = $null
-        TotalSizeTB = $null
-        TotalSizeTiB = $null
-    }
-    
     $storageRegionalSummary = $StorageAccounts | Group-Object Region | ForEach-Object {
         $totalCapacityBytes = ($_.Group | Measure-Object -Property UsedCapacityBytes -Sum).Sum
         if ($totalCapacityBytes -eq $null) { $totalCapacityBytes = 0 }
+        $totalBlobCount = ($_.Group | Measure-Object -Property BlobCount -Sum).Sum
+        if ($totalBlobCount -eq $null) { $totalBlobCount = 0 }
         $totalCapacityGB = [math]::round(($totalCapacityBytes / 1000000000), 2)  # Convert bytes to GB
         $totalCapacityTB = [math]::Round($totalCapacityBytes / 1000000000000, 4)  # Convert bytes to TB
         $totalCapacityTiB = [math]::Round($totalCapacityBytes / 1099511627776, 4)  # Convert bytes to TiB
         [PSCustomObject]@{
-            ResourceType = ""
+            Subscription = "All"
+            ResourceType = "Storage Account (Total Blobs: $totalBlobCount)"
             Region = $_.Name
             Count = $_.Count
             TotalSizeGB = $totalCapacityGB
@@ -472,19 +464,146 @@ if ($StorageAccounts.Count -and $Selected.STORAGE) {
         }
     } | Sort-Object Region
     
-    $summaryRows += $storageRegionalSummary
-    
-    # Add gap after Storage section
+    $summaryRows += $storageRegionalSummary  
+}
+
+# Add gap after overall summary
+$summaryRows += [PSCustomObject]@{ 
+    ResourceType = ""
+    Region = $null
+    Count = $null
+    TotalSizeGB = $null
+    TotalSizeTB = $null
+    TotalSizeTiB = $null
+}
+
+# Add subscription-level summaries header
+$summaryRows += [PSCustomObject]@{ 
+    Subscription = "[ Subscription level Summary ]"
+    ResourceType = ""
+    Region = ""
+    Count = ""
+    TotalSizeGB = ""
+    TotalSizeTB = ""
+    TotalSizeTiB = ""
+}
+
+# Loop through each subscription we already processed
+foreach ($sub in $subs) {
+    $subscriptionName = $sub.Name
+    # Add subscription header
     $summaryRows += [PSCustomObject]@{ 
+        Subscription = $subscriptionName
         ResourceType = ""
-        Region = $null
-        Count = $null
-        TotalSizeGB = $null
-        TotalSizeTB = $null
-        TotalSizeTiB = $null
+        Region = ""
+        Count = ""
+        TotalSizeGB = ""
+        TotalSizeTB = ""
+        TotalSizeTiB = ""
+    }
+    
+    # Process VMs for this subscription
+    if ($Selected.VM) {
+        $subscriptionVMs = $VMs | Where-Object { $_.Subscription -eq $subscriptionName }
+        if ($subscriptionVMs.Count -gt 0) {
+            # Add VM resource type total for this subscription
+            $totalVMDiskSize = ($subscriptionVMs | Measure-Object -Property VMDiskSizeGB -Sum).Sum
+            if ($totalVMDiskSize -eq $null) { $totalVMDiskSize = 0 }
+            $totalVMDiskSizeTB = [math]::Round($totalVMDiskSize / 1000, 4)
+            $totalVMDiskSizeTiB = [math]::Round($totalVMDiskSize / 1024, 4)
+            
+            $summaryRows += [PSCustomObject]@{
+                Subscription = $subscriptionName
+                ResourceType = "VM"
+                Region = "All"
+                Count = $subscriptionVMs.Count
+                TotalSizeGB = $totalVMDiskSize
+                TotalSizeTB = $totalVMDiskSizeTB
+                TotalSizeTiB = $totalVMDiskSizeTiB
+            }
+            
+            # Add regional breakdown for VMs in this subscription
+            $vmRegionalBreakdown = $subscriptionVMs | Group-Object Region | ForEach-Object {
+                $totalDiskSize = ($_.Group | Measure-Object -Property VMDiskSizeGB -Sum).Sum
+                if ($totalDiskSize -eq $null) { $totalDiskSize = 0 }
+                $totalDiskSizeTB = [math]::Round($totalDiskSize / 1000, 4)
+                $totalDiskSizeTiB = [math]::Round($totalDiskSize / 1024, 4)
+                [PSCustomObject]@{
+                    Subscription = $subscriptionName
+                    ResourceType = "VM"
+                    Region = $_.Name
+                    Count = $_.Count
+                    TotalSizeGB = $totalDiskSize
+                    TotalSizeTB = $totalDiskSizeTB
+                    TotalSizeTiB = $totalDiskSizeTiB
+                }
+            } | Sort-Object Region
+            
+            $summaryRows += $vmRegionalBreakdown
+        }
+    }
+    
+    # Process Storage Accounts for this subscription
+    if ($Selected.STORAGE) {
+        $subscriptionStorage = $StorageAccounts | Where-Object { $_.Subscription -eq $subscriptionName }
+        if ($subscriptionStorage.Count -gt 0) {
+            # Add Storage resource type total for this subscription
+            $totalStorageCapacityBytes = ($subscriptionStorage | Measure-Object -Property UsedCapacityBytes -Sum).Sum
+            if ($totalStorageCapacityBytes -eq $null) { $totalStorageCapacityBytes = 0 }
+            $totalBlobCount = ($subscriptionStorage | Measure-Object -Property BlobCount -Sum).Sum
+            if ($totalBlobCount -eq $null) { $totalBlobCount = 0 }
+            $totalStorageCapacityGB = [math]::round(($totalStorageCapacityBytes / 1000000000), 2)
+            $totalStorageCapacityTB = [math]::Round($totalStorageCapacityBytes / 1000000000000, 4)
+            $totalStorageCapacityTiB = [math]::Round($totalStorageCapacityBytes / 1099511627776, 4)
+            
+            $summaryRows += [PSCustomObject]@{
+                Subscription = $subscriptionName
+                ResourceType = "Storage Account (Total Blobs: $totalBlobCount)"
+                Region = "All"
+                Count = $subscriptionStorage.Count
+                TotalSizeGB = $totalStorageCapacityGB
+                TotalSizeTB = $totalStorageCapacityTB
+                TotalSizeTiB = $totalStorageCapacityTiB
+            }
+            
+            # Add regional breakdown for Storage Accounts in this subscription
+            $storageRegionalBreakdown = $subscriptionStorage | Group-Object Region | ForEach-Object {
+                $totalCapacityBytes = ($_.Group | Measure-Object -Property UsedCapacityBytes -Sum).Sum
+                if ($totalCapacityBytes -eq $null) { $totalCapacityBytes = 0 }
+                $totalBlobCount = ($_.Group | Measure-Object -Property BlobCount -Sum).Sum
+                if ($totalBlobCount -eq $null) { $totalBlobCount = 0 }
+                $totalCapacityGB = [math]::round(($totalCapacityBytes / 1000000000), 2)
+                $totalCapacityTB = [math]::Round($totalCapacityBytes / 1000000000000, 4)
+                $totalCapacityTiB = [math]::Round($totalCapacityBytes / 1099511627776, 4)
+                [PSCustomObject]@{
+                    Subscription = $subscriptionName
+                    ResourceType = "Storage Account (Total Blobs: $totalBlobCount)"
+                    Region = $_.Name
+                    Count = $_.Count
+                    TotalSizeGB = $totalCapacityGB
+                    TotalSizeTB = $totalCapacityTB
+                    TotalSizeTiB = $totalCapacityTiB
+                }
+            } | Sort-Object Region
+            
+            $summaryRows += $storageRegionalBreakdown
+        }
+    }
+    
+    # Add gap after each subscription
+    $summaryRows += [PSCustomObject]@{ 
+        Subscription = ""
+        ResourceType = ""
+        Region = ""
+        Count = ""
+        TotalSizeGB = ""
+        TotalSizeTB = ""
+        TotalSizeTiB = ""
     }
 }
 
+
+# Export summary if we have any rows
 if ($summaryRows.Count) {  
     Write-Progress -Id 4 -Activity "Generating Output Files" -Status "Writing comprehensive summary..." -PercentComplete 75
     $summaryRows | Export-Csv (Join-Path $outdir "azure_inventory_summary_$dateStr.csv") -NoTypeInformation  
@@ -496,7 +615,7 @@ Write-Host "`n=== All Output Files Created Successfully ===" -ForegroundColor Gr
 Write-Progress -Id 4 -Activity "Generating Output Files" -Status "Creating ZIP archive..." -PercentComplete 90
 
 Stop-Transcript
-  
+
 # Zip results  
 $zipfile = Join-Path $PWD ("azure_sizing_" + $dateStr + ".zip")  
 Add-Type -AssemblyName System.IO.Compression.FileSystem  
@@ -512,4 +631,4 @@ Write-Host "Temporary directory removed: $outdir" -ForegroundColor Green
   
 # Show final results on console
 Write-Host "`nInventory complete. Results in $zipfile`n" -ForegroundColor Green
-Write-Host "All output files have been compressed into the ZIP archive." -ForegroundColor Cyan
+Write-Host "All output files have been compressed into the ZIP archive. Please provide to Commvault representative." -ForegroundColor Cyan
