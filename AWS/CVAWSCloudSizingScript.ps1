@@ -121,7 +121,7 @@
        https://github.com/PowerShell/PowerShell/releases
 
     2. Install AWS Tools for PowerShell (as listed in #requires):
-       Install-Module -Name AWSPowerShell.NetCore -Force
+       Install-Module -Name AWS.Tools.Common, AWS.Tools.EC2, AWS.Tools.S3, AWS.Tools.SecurityToken, AWS.Tools.IdentityManagement, AWS.Tools.CloudWatch, ImportExcel -Force
 
     3. Configure AWS CLI profiles:
        aws configure --profile MyProfile
