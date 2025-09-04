@@ -1,5 +1,5 @@
 #requires -Version 7.0
-#requires -Modules ImportExcel, AWS.Tools.Common, AWS.Tools.EC2, AWS.Tools.S3, AWS.Tools.RDS, AWS.Tools.SecurityToken, AWS.Tools.Organizations, AWS.Tools.IdentityManagement, AWS.Tools.CloudWatch, AWS.Tools.ElasticFileSystem, AWS.Tools.SSO, AWS.Tools.SSOOIDC, AWS.Tools.FSx, AWS.Tools.Backup, AWS.Tools.CostExplorer, AWS.Tools.DynamoDBv2, AWS.Tools.SQS, AWS.Tools.SecretsManager, AWS.Tools.KeyManagementService, AWS.Tools.EKS
+#requires -Modules ImportExcel, AWS.Tools.Common, AWS.Tools.EC2, AWS.Tools.S3, AWS.Tools.SecurityToken, AWS.Tools.IdentityManagement, AWS.Tools.CloudWatch
 <#
 .SYNOPSIS
     AWS Cloud Sizing Script – Comprehensive EC2 and Storage inventory and sizing analysis.
@@ -221,20 +221,16 @@ $baseOutputS3 = "aws_s3_info"
 $archiveFile = "aws_sizing_results_$date_string.zip"
 
 # Collections for multi-account processing
-$ec2ListByAccount = @{}                   # Dictionary to store EC2 instances by account
-$ec2UnattachedVolListByAccount = @{}      # Dictionary to store unattached EBS volumes by account
-$s3ListByAccount = @{}                    # Dictionary to store S3 buckets by account
-$accountsProcessed = [System.Collections.ArrayList]::new()  # List of processed accounts
-$allOutputFiles = [System.Collections.ArrayList]::new()     # List of generated output files
+$ec2ListByAccount = @{}                   
+$ec2UnattachedVolListByAccount = @{}      
+$s3ListByAccount = @{}                   
+$accountsProcessed = [System.Collections.ArrayList]::new()  
+$allOutputFiles = [System.Collections.ArrayList]::new() 
 
-# Main function to collect AWS data for a given credential/account
 function getAWSData($cred) {
-  # Determine which regions to inventory
   if ($Regions -and $Regions.Trim() -ne '') {
-    # Use user-specified regions
     [string[]]$awsRegions = $Regions.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
   } else {
-    # Query all available regions
     try {
       $awsRegions = Get-EC2Region @profileLocationOpt -Region $queryRegion -Credential $cred | Select-Object -ExpandProperty RegionName
     } catch {
@@ -418,19 +414,16 @@ function getAWSData($cred) {
         Add-Member -InputObject $s3obj -NotePropertyName ($bytesStorage.Name + "_SizeBytes") -NotePropertyValue $sizeBytes
       }
 
-      # Add object count properties for each storage type
       foreach ($numObjStorage in $numObjStorages.GetEnumerator()) {
         $count = if ($null -eq $numObjStorage.Value) {0}else{$numObjStorage.Value}
         Add-Member -InputObject $s3obj -MemberType NoteProperty -Name ("NumberOfObjects-" + $numObjStorage.Name) -Value $count
       }
 
-      # Add tag properties
       foreach ($tag in $bucketTags) {
         $key = $tag.Key -replace '[^a-zA-Z0-9]','_'
         Add-Member -InputObject $s3obj -MemberType NoteProperty -Name ("Tag: $key") -Value $tag.Value -Force
       }
 
-      # Add S3 bucket to the account's collection
       $s3List.Add($s3obj) | Out-Null
     }
     Write-Progress -ID 3 -Activity "Buckets done" -Completed
@@ -478,7 +471,6 @@ function getAWSData($cred) {
         InBackupPlan    = $false
       }
       
-      # Add tags as properties
       foreach ($tag in $ec2.Tags) {
         $key = $tag.Key -replace '[^a-zA-Z0-9]','_'
         if ($key -ne 'Name') {
