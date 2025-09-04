@@ -86,25 +86,6 @@
        .\CVAzureCloudSizingScript.ps1
        .\CVAzureCloudSizingScript.ps1 -Types VM
        .\CVAzureCloudSizingScript.ps1 -Subscriptions "MySubscription"
-
-    OUTPUT AND RESULTS:
-
-    The script generates a timestamped ZIP file containing:
-    - VM inventory CSV with disk sizing details
-    - Storage Account inventory CSV with capacity metrics  
-    - Summary CSV with regional breakdowns and totals
-    - Complete execution log file
-
-    All individual CSV files are automatically compressed into a single ZIP archive.
-    The temporary directory is cleaned up after ZIP creation.
-    Copy the generated ZIP file and share it with the requesting party.
-
-    TROUBLESHOOTING:
-
-    - Ensure proper Azure permissions before running
-    - If module import fails, run: Import-Module Az -Force
-    - For large environments, expect longer execution times
-    - Check the log file in the ZIP for detailed error information
 #>  
   
 param(  
