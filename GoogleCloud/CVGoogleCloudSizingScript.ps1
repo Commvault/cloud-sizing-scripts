@@ -18,14 +18,16 @@
     Optional. Target specific GCP projects by name or ID. If omitted, all accessible projects will be processed.
 
 .OUTPUTS
-    Creates timestamped output directory with:
-    - gcp_vm_info_YYYY-MM-DD_HHMMSS.csv
-    - gcp_disks_attached_to_vms_YYYY-MM-DD_HHMMSS.csv
-    - gcp_disks_unattached_to_vms_YYYY-MM-DD_HHMMSS.csv
-    - gcp_storage_buckets_info_YYYY-MM-DD_HHMMSS.csv
-    - gcp_inventory_summary_YYYY-MM-DD_HHMMSS.csv
-    - gcp_sizing_script_output_YYYY-MM-DD_HHMMSS.log
-    - gcp_sizing_YYYY-MM-DD_HHMMSS.zip
+        Runtime creates a timestamped working directory (gcp-inv-YYYY-MM-DD_HHMMSS) containing:
+            - gcp_vm_instance_info_YYYY-MM-DD_HHMMSS.csv                (VM inventory)
+            - gcp_disks_attached_to_vm_instances_YYYY-MM-DD_HHMMSS.csv  (attached disks)
+            - gcp_disks_unattached_to_vm_instances_YYYY-MM-DD_HHMMSS.csv(unattached disks)
+            - gcp_storage_buckets_info_YYYY-MM-DD_HHMMSS.csv   (bucket inventory)
+            - gcp_inventory_summary_YYYY-MM-DD_HHMMSS.csv      (summary rollups)
+            - gcp_sizing_script_output_YYYY-MM-DD_HHMMSS.log   (transcript/log)
+        These files are zipped into:
+            - gcp_sizing_YYYY-MM-DD_HHMMSS.zip
+        After the ZIP is created the working directory is deleted; only the ZIP archive remains.
 
 .NOTES
     Requires Google Cloud SDK (gcloud CLI and gsutil) installed and authenticated.
@@ -45,6 +47,8 @@ SETUP INSTRUCTIONS FOR GOOGLE CLOUD SHELL (Recommended):
 3. Access Google Cloud Shell:
     - Login to Google Cloud Console with your account
     - Open Google Cloud Shell
+    - Enter PowerShell mode, by executing the command:
+        pwsh
 
 4. Upload this script:
     Use the Cloud Shell file upload feature to upload CVGoogleCloudSizingScript.ps1
@@ -607,20 +611,20 @@ function Add-BucketSummary {
 
 # Always generate all VM-related CSVs if VM inventory is selected and data exists
 if ($Selected.VM -and $invResults.VMs -and $invResults.VMs.Count) {
-    $vmCsv = Join-Path $outDir ("gcp_vm_info_" + $dateStr + ".csv")
+    $vmCsv = Join-Path $outDir ("gcp_vm_instance_info_" + $dateStr + ".csv")
     Write-PlainCsv -Data $invResults.VMs -Path $vmCsv
     Write-Host "VMs CSV written: $(Split-Path $vmCsv -Leaf)" -ForegroundColor Cyan
     Add-VmInfoSummary -Path $vmCsv -VmData $invResults.VMs
 
     if ($invResults.AttachedDisks -and $invResults.AttachedDisks.Count) {
-        $attachedCsv = Join-Path $outDir ("gcp_disks_attached_to_vms_" + $dateStr + ".csv")
+        $attachedCsv = Join-Path $outDir ("gcp_disks_attached_to_vm_instances_" + $dateStr + ".csv")
         Write-PlainCsv -Data $invResults.AttachedDisks -Path $attachedCsv
         Write-Host "Attached disks CSV written: $(Split-Path $attachedCsv -Leaf)" -ForegroundColor Cyan
     Add-DiskSummary -Path $attachedCsv -DiskData $invResults.AttachedDisks -Title 'Attached Disks'
     }
 
     if ($invResults.UnattachedDisks -and $invResults.UnattachedDisks.Count) {
-        $unattachedCsv = Join-Path $outDir ("gcp_disks_unattached_to_vms_" + $dateStr + ".csv")
+        $unattachedCsv = Join-Path $outDir ("gcp_disks_unattached_to_vm_instances_" + $dateStr + ".csv")
         Write-PlainCsv -Data $invResults.UnattachedDisks -Path $unattachedCsv
         Write-Host "Unattached disks CSV written: $(Split-Path $unattachedCsv -Leaf)" -ForegroundColor Cyan
     Add-DiskSummary -Path $unattachedCsv -DiskData $invResults.UnattachedDisks -Title 'Unattached Disks'
