@@ -83,9 +83,17 @@ SETUP INSTRUCTIONS FOR LOCAL SYSTEM:
     Ensure your account has "Viewer" or higher role on target projects
 
 5. Run the script:
-    .\CVGoogleCloudSizingScript.ps1
-    .\CVGoogleCloudSizingScript.ps1 -Types VM
-    .\CVGoogleCloudSizingScript.ps1 -Projects "my-gcp-project"
+    # For all workload, all Projects
+    ./CVGoogleCloudSizingScript.ps1
+
+    # For specific workloads, all Projects
+    ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+
+    # For all workload, specific Projects
+    ./CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
+
+    # For specific workloads, specific Projects
+    ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
 
 EXAMPLE USAGE
 -------------
@@ -98,10 +106,10 @@ EXAMPLE USAGE
      .\CVGoogleCloudSizingScript.ps1 -Types VM
      # Only inventories Compute Engine VMs in all projects
 
-     .\CVGoogleCloudSizingScript.ps1 -Projects "my-gcp-project-1","my-gcp-project-2"
+     .\CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
      # Inventories VMs and Storage Buckets in only the specified projects
 
-     .\CVGoogleCloudSizingScript.ps1 -Types Storage -Projects "my-gcp-project-1"
+     .\CVGoogleCloudSizingScript.ps1 -Types Storage -Projects my-gcp-project-1
      # Only inventories Storage Buckets in the specified project
 #>
 
