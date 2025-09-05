@@ -13,9 +13,19 @@
 .PARAMETER Types
     Optional. Restrict inventory to specific resource types. Valid values: VM, Storage.
     If omitted, both VMs and Storage will be inventoried.
+    Accepts any of the following forms:
+        -Types VM,Storage              (unquoted comma-separated list)
+        -Types "VM"                    (single value)
+        -Types "VM","Storage"        (standard string array)
+        -Types "VM,Storage"           (single quoted comma-separated string; auto-split)
 
 .PARAMETER Projects
-    Optional. Target specific GCP projects by name or ID. If omitted, all accessible projects will be processed.
+        Optional. Target specific GCP projects by name or ID. If omitted, all accessible projects will be processed.
+        Accepts any of the following forms:
+            -Projects proj1,proj2              (unquoted comma-separated list)
+            -Projects "proj1"                  (single project)
+            -Projects "proj1","proj2"        (standard string array)
+            -Projects "proj1,proj2"           (single quoted comma-separated string; will be auto-split)
 
 .OUTPUTS
         Runtime creates a timestamped working directory (gcp-inv-YYYY-MM-DD_HHMMSS) containing:
@@ -118,6 +128,16 @@ param(
     [string[]]$Types,
     [string[]]$Projects
 )
+
+# Normalize -Projects if provided as a single comma-separated string inside quotes
+if ($Projects -and $Projects.Count -eq 1 -and $Projects[0] -match ',') {
+    $Projects = $Projects[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+
+# Normalize -Types if provided as a single comma-separated string inside quotes
+if ($Types -and $Types.Count -eq 1 -and $Types[0] -match ',') {
+    $Types = $Types[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
 
 # -------------------------
 # Setup output + transcript
