@@ -52,6 +52,7 @@ SETUP INSTRUCTIONS FOR GOOGLE CLOUD SHELL (Recommended):
 
 4. Upload this script:
     Use the Cloud Shell file upload feature to upload CVGoogleCloudSizingScript.ps1
+    - run chmod +x CVGoogleCloudSizingScript.ps1 to allow the script execution permissions
 
 5. Run the script:
     ./CVGoogleCloudSizingScript.ps1
