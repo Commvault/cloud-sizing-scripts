@@ -55,9 +55,18 @@ SETUP INSTRUCTIONS FOR GOOGLE CLOUD SHELL (Recommended):
     - run chmod +x CVGoogleCloudSizingScript.ps1 to allow the script execution permissions
 
 5. Run the script:
+    # For all workload, all Projects
     ./CVGoogleCloudSizingScript.ps1
+
+    # For specific workloads, all Projects
     ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
-    ./CVGoogleCloudSizingScript.ps1 -Projects "my-gcp-project-1","my-gcp-project-2"
+
+    # For all workload, specific Projects
+    ./CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
+
+    # For specific workloads, specific Projects
+    ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
+
 
 SETUP INSTRUCTIONS FOR LOCAL SYSTEM:
 
@@ -705,6 +714,8 @@ if ($Selected.STORAGE -and $bucketData) {
     }
 }
 
+# 4 spacer rows
+1..4 | ForEach-Object { $summaryRows += (New-BlankSummaryRow) }
 # -------------------------
 # NEW: Cumulative Region-level rows across ALL projects (placed after project-level)
 # For VMs: sum distinct disks per region to avoid double counting
