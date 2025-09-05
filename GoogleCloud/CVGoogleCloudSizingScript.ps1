@@ -42,85 +42,83 @@
 .NOTES
     Requires Google Cloud SDK (gcloud CLI and gsutil) installed and authenticated.
     Must be run by a user with appropriate GCP permissions.
-#>
 
 
-<#
-SETUP INSTRUCTIONS FOR GOOGLE CLOUD SHELL (Recommended):
+    SETUP INSTRUCTIONS FOR GOOGLE CLOUD SHELL (Recommended):
 
-1. Learn about Google Cloud Shell:
-    Visit: https://cloud.google.com/shell/docs
+    1. Learn about Google Cloud Shell:
+        Visit: https://cloud.google.com/shell/docs
 
-2. Verify GCP permissions:
-    Ensure your Google account has "Viewer" or higher role on target projects.
+    2. Verify GCP permissions:
+        Ensure your Google account has "Viewer" or higher role on target projects.
 
-3. Access Google Cloud Shell:
-    - Login to Google Cloud Console with your account
-    - Open Google Cloud Shell
-    - Enter PowerShell mode, by executing the command:
-        pwsh
+    3. Access Google Cloud Shell:
+        - Login to Google Cloud Console with your account
+        - Open Google Cloud Shell
+        - Enter PowerShell mode, by executing the command:
+            pwsh
 
-4. Upload this script:
-    Use the Cloud Shell file upload feature to upload CVGoogleCloudSizingScript.ps1
-    - run chmod +x CVGoogleCloudSizingScript.ps1 to allow the script execution permissions
+    4. Upload this script:
+        Use the Cloud Shell file upload feature to upload CVGoogleCloudSizingScript.ps1
+        - run chmod +x CVGoogleCloudSizingScript.ps1 to allow the script execution permissions
 
-5. Run the script:
-    # For all workload, all Projects
-    ./CVGoogleCloudSizingScript.ps1
+    5. Run the script:
+        # For all workload, all Projects
+        ./CVGoogleCloudSizingScript.ps1
 
-    # For specific workloads, all Projects
-    ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+        # For specific workloads, all Projects
+        ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
 
-    # For all workload, specific Projects
-    ./CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
+        # For all workload, specific Projects
+        ./CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
 
-    # For specific workloads, specific Projects
-    ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
+        # For specific workloads, specific Projects
+        ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
 
 
-SETUP INSTRUCTIONS FOR LOCAL SYSTEM:
+    SETUP INSTRUCTIONS FOR LOCAL SYSTEM:
 
-1. Install PowerShell 7:
-    Download from: https://github.com/PowerShell/PowerShell/releases
+    1. Install PowerShell 7:
+        Download from: https://github.com/PowerShell/PowerShell/releases
 
-2. Install Google Cloud SDK:
-    Download from: https://cloud.google.com/sdk/docs/install
+    2. Install Google Cloud SDK:
+        Download from: https://cloud.google.com/sdk/docs/install
 
-3. Authenticate with GCP:
-    gcloud auth login
+    3. Authenticate with GCP:
+        gcloud auth login
 
-4. Verify permissions:
-    Ensure your account has "Viewer" or higher role on target projects
+    4. Verify permissions:
+        Ensure your account has "Viewer" or higher role on target projects
 
-5. Run the script:
-    # For all workload, all Projects
-    ./CVGoogleCloudSizingScript.ps1
+    5. Run the script:
+        # For all workload, all Projects
+        ./CVGoogleCloudSizingScript.ps1
 
-    # For specific workloads, all Projects
-    ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+        # For specific workloads, all Projects
+        ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
 
-    # For all workload, specific Projects
-    ./CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
+        # For all workload, specific Projects
+        ./CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
 
-    # For specific workloads, specific Projects
-    ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
+        # For specific workloads, specific Projects
+        ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
 
-EXAMPLE USAGE
--------------
-     .\CVGoogleCloudSizingScript.ps1
-     # Inventories VMs and Storage Buckets in all accessible projects
+    EXAMPLE USAGE
+    -------------
+        .\CVGoogleCloudSizingScript.ps1
+        # Inventories VMs and Storage Buckets in all accessible projects
 
-     .\CVGoogleCloudSizingScript.ps1 -Types VM,Storage
-     # Explicitly inventories VMs and Storage Buckets in all projects (same as default)
+        .\CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+        # Explicitly inventories VMs and Storage Buckets in all projects (same as default)
 
-     .\CVGoogleCloudSizingScript.ps1 -Types VM
-     # Only inventories Compute Engine VMs in all projects
+        .\CVGoogleCloudSizingScript.ps1 -Types VM
+        # Only inventories Compute Engine VMs in all projects
 
-     .\CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
-     # Inventories VMs and Storage Buckets in only the specified projects
+        .\CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
+        # Inventories VMs and Storage Buckets in only the specified projects
 
-     .\CVGoogleCloudSizingScript.ps1 -Types Storage -Projects my-gcp-project-1
-     # Only inventories Storage Buckets in the specified project
+        .\CVGoogleCloudSizingScript.ps1 -Types Storage -Projects my-gcp-project-1
+        # Only inventories Storage Buckets in the specified project
 #>
 
 param(
