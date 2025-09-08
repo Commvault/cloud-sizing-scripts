@@ -20,7 +20,7 @@
         -Types "VM,Storage"           (single quoted comma-separated string; auto-split)
 
 .PARAMETER Projects
-        Optional. Target specific GCP projects by name or ID. If omitted, all accessible projects will be processed.
+    Optional. Target specific GCP projects by name or ID. If omitted, all accessible projects will be processed.
         Accepts any of the following forms:
             -Projects proj1,proj2              (unquoted comma-separated list)
             -Projects "proj1"                  (single project)
@@ -36,33 +36,60 @@
             - gcp_inventory_summary_YYYY-MM-DD_HHMMSS.csv      (summary rollups)
             - gcp_sizing_script_output_YYYY-MM-DD_HHMMSS.log   (transcript/log)
         These files are zipped into:
-            - gcp_sizing_YYYY-MM-DD_HHMMSS.zip
-        After the ZIP is created the working directory is deleted; only the ZIP archive remains.
+    - gcp_sizing_YYYY-MM-DD_HHMMSS.zip
 
 .NOTES
     Requires Google Cloud SDK (gcloud CLI and gsutil) installed and authenticated.
     Must be run by a user with appropriate GCP permissions.
 
 
-    SETUP INSTRUCTIONS FOR GOOGLE CLOUD SHELL (Recommended):
+SETUP INSTRUCTIONS FOR GOOGLE CLOUD SHELL (Recommended):
 
-    1. Learn about Google Cloud Shell:
-        Visit: https://cloud.google.com/shell/docs
+1. Learn about Google Cloud Shell:
+    Visit: https://cloud.google.com/shell/docs
 
-    2. Verify GCP permissions:
-        Ensure your Google account has "Viewer" or higher role on target projects.
+2. Verify GCP permissions:
+    Ensure your Google account has "Viewer" or higher role on target projects.
 
-    3. Access Google Cloud Shell:
-        - Login to Google Cloud Console with your account
-        - Open Google Cloud Shell
+3. Access Google Cloud Shell:
+    - Login to Google Cloud Console with your account
+    - Open Google Cloud Shell
         - Enter PowerShell mode, by executing the command:
             pwsh
 
-    4. Upload this script:
-        Use the Cloud Shell file upload feature to upload CVGoogleCloudSizingScript.ps1
+4. Upload this script:
+    Use the Cloud Shell file upload feature to upload CVGoogleCloudSizingScript.ps1
         - run chmod +x CVGoogleCloudSizingScript.ps1 to allow the script execution permissions
 
-    5. Run the script:
+5. Run the script:
+        # For all workload, all Projects
+    ./CVGoogleCloudSizingScript.ps1
+
+        # For specific workloads, all Projects
+    ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+
+        # For all workload, specific Projects
+        ./CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
+
+        # For specific workloads, specific Projects
+        ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
+
+
+SETUP INSTRUCTIONS FOR LOCAL SYSTEM:
+
+1. Install PowerShell 7:
+    Download from: https://github.com/PowerShell/PowerShell/releases
+
+2. Install Google Cloud SDK:
+    Download from: https://cloud.google.com/sdk/docs/install
+
+3. Authenticate with GCP:
+    gcloud auth login
+
+4. Verify permissions:
+    Ensure your account has "Viewer" or higher role on target projects
+
+5. Run the script:
         # For all workload, all Projects
         ./CVGoogleCloudSizingScript.ps1
 
@@ -75,50 +102,22 @@
         # For specific workloads, specific Projects
         ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
 
+EXAMPLE USAGE
+-------------
+     .\CVGoogleCloudSizingScript.ps1
+     # Inventories VMs and Storage Buckets in all accessible projects
 
-    SETUP INSTRUCTIONS FOR LOCAL SYSTEM:
+     .\CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+     # Explicitly inventories VMs and Storage Buckets in all projects (same as default)
 
-    1. Install PowerShell 7:
-        Download from: https://github.com/PowerShell/PowerShell/releases
-
-    2. Install Google Cloud SDK:
-        Download from: https://cloud.google.com/sdk/docs/install
-
-    3. Authenticate with GCP:
-        gcloud auth login
-
-    4. Verify permissions:
-        Ensure your account has "Viewer" or higher role on target projects
-
-    5. Run the script:
-        # For all workload, all Projects
-        ./CVGoogleCloudSizingScript.ps1
-
-        # For specific workloads, all Projects
-        ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
-
-        # For all workload, specific Projects
-        ./CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
-
-        # For specific workloads, specific Projects
-        ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
-
-    EXAMPLE USAGE
-    -------------
-        .\CVGoogleCloudSizingScript.ps1
-        # Inventories VMs and Storage Buckets in all accessible projects
-
-        .\CVGoogleCloudSizingScript.ps1 -Types VM,Storage
-        # Explicitly inventories VMs and Storage Buckets in all projects (same as default)
-
-        .\CVGoogleCloudSizingScript.ps1 -Types VM
-        # Only inventories Compute Engine VMs in all projects
+     .\CVGoogleCloudSizingScript.ps1 -Types VM
+     # Only inventories Compute Engine VMs in all projects
 
         .\CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
-        # Inventories VMs and Storage Buckets in only the specified projects
+     # Inventories VMs and Storage Buckets in only the specified projects
 
-        .\CVGoogleCloudSizingScript.ps1 -Types Storage -Projects my-gcp-project-1
-        # Only inventories Storage Buckets in the specified project
+     .\CVGoogleCloudSizingScript.ps1 -Types Storage -Projects "my-gcp-project-1"
+     # Only inventories Storage Buckets in the specified project
 #>
 
 param(
@@ -127,15 +126,8 @@ param(
     [string[]]$Projects
 )
 
-# Normalize -Projects if provided as a single comma-separated string inside quotes
-if ($Projects -and $Projects.Count -eq 1 -and $Projects[0] -match ',') {
-    $Projects = $Projects[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-}
-
-# Normalize -Types if provided as a single comma-separated string inside quotes
-if ($Types -and $Types.Count -eq 1 -and $Types[0] -match ',') {
-    $Types = $Types[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-}
+# Minimal logging mode (set to $false to re-enable verbose progress lines)
+$MinimalOutput = $true
 
 # -------------------------
 # Setup output + transcript
@@ -144,8 +136,9 @@ $dateStr = (Get-Date).ToString("yyyy-MM-dd_HHmmss")
 $outDir = Join-Path -Path $PWD -ChildPath ("gcp-inv-" + $dateStr)
 New-Item -Path $outDir -ItemType Directory -Force | Out-Null
 
-$logFile = Join-Path $outDir ("gcp_sizing_script_output_" + $dateStr + ".log")
-Start-Transcript -Path $logFile -Append | Out-Null
+$transcriptFile = Join-Path $outDir ("gcp_sizing_script_output_" + $dateStr + ".log")
+Start-Transcript -Path $transcriptFile -Append | Out-Null
+
 
 Write-Host "=== GCP Resource Inventory Started ===" -ForegroundColor Green
 if ($Types)    { Write-Host "  Types: $($Types -join ', ')" -ForegroundColor Green }
@@ -201,58 +194,19 @@ function Get-RegionFromZone {
 # -------------------------
 function Write-Log {
     param(
-        [Parameter(Mandatory)][string]$Message,
+        [string]$Message,
         [ValidateSet('INFO','WARN','ERROR','DEBUG')][string]$Level = 'INFO'
     )
+    if ($MinimalOutput) {
+        if ($Level -eq 'ERROR') { Write-Host "ERROR: $Message" -ForegroundColor Red }
+        return
+    }
     $ts = (Get-Date).ToString('s')
-    # Host output is captured by Start-Transcript already
-    switch ($Level) {
-        'ERROR' { Write-Host "[$ts] [$Level] $Message" -ForegroundColor Red }
-        'WARN'  { Write-Host "[$ts] [$Level] $Message" -ForegroundColor Yellow }
-        'DEBUG' { Write-Host "[$ts] [$Level] $Message" -ForegroundColor DarkGray }
-        default { Write-Host "[$ts] [$Level] $Message" -ForegroundColor Gray }
-    }
+    $line = "[$ts] [$Level] $Message"
+    Write-Host $line
 }
 
-# -------------------------
-# Bucket sizing helper
-# Strategy:
-# 1. Fast path: gsutil du -s (handles large buckets, avoids enumerating every object)
-# 2. Fallback: gcloud storage objects list + sum sizes (only if du fails or returns nothing)
-# 3. If both fail -> 0 with warning
-# -------------------------
-function Get-BucketSizeBytes {
-    param(
-        [Parameter(Mandatory)][string]$BucketName,
-        [Parameter(Mandatory)][string]$Project
-    )
 
-    # Attempt gsutil du -s
-    try {
-        $du = gsutil du -s "gs://$BucketName" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $du) {
-            $firstField = ($du -split '\s+')[0]
-            if ($firstField -match '^[0-9]+$') {
-                return [int64]$firstField
-            }
-        }
-    } catch {
-        Write-Log -Level WARN -Message ("gsutil du failed for {0} in {1}: {2}" -f $BucketName, $Project, ($_.Exception.Message))
-    }
-
-    # Fallback (can be slow for very large buckets): enumerate objects
-    $sizeBytes = 0
-    try {
-        $sizes = gcloud storage objects list "gs://$BucketName" --project $Project --format="value(size)" 2>$null
-        foreach ($s in $sizes) { if ($s -match '^[0-9]+$') { $sizeBytes += [int64]$s } }
-        return [int64]$sizeBytes
-    } catch {
-        Write-Log -Level WARN -Message ("Fallback object enumeration failed for {0} in {1}: {2}" -f $BucketName, $Project, ($_.Exception.Message))
-    }
-
-    Write-Log -Level WARN -Message ("Unable to determine size for bucket {0} in {1} (returning 0)." -f $BucketName, $Project)
-    return 0
-}
 
 # -------------------------
 # VM + Disk Inventory (fast)
@@ -421,6 +375,221 @@ function Get-GcpVMInventory {
     }
 }
 
+# Helper - Update bucket progress
+function Update-BucketWorkProgress {
+    param([string]$Phase,[int]$Current,[int]$Total)
+    if ($Total -le 0) { $Total = 1 }
+    $pctRaw = ($Current / $Total) * 100
+    if ($pctRaw -gt 100) { $pctRaw = 100 }
+    $pct = [math]::Round($pctRaw,0)
+    Write-Progress -Id 41 -ParentId 4 -Activity "Bucket Workload" -Status ("{0} ({1}/{2})" -f $Phase,$Current,$Total) -PercentComplete $pct
+}
+
+
+# MultiThreading - Script Blocks for Bucket sizing
+$bucketSizingScriptBlock = {
+        param($projectName, $bucket)
+        # -------------------------
+        # Bucket sizing helper
+        # Strategy:
+        # 1. Fast path: gsutil du -s (handles large buckets, avoids enumerating every object)
+        # 2. Fallback: gcloud storage objects list + sum sizes (only if du fails or returns nothing)
+        # 3. If both fail -> 0 with warning
+        # -------------------------
+        function Get-BucketSizeBytes {
+            param(
+                [Parameter(Mandatory)][string]$BucketName,
+                [Parameter(Mandatory)][string]$Project
+            )
+            
+            # Attempt gsutil du -s
+            try {
+                $du = gsutil du -s "gs://$BucketName" 2>$null
+                if ($LASTEXITCODE -eq 0 -and $du) {
+                    $firstField = ($du -split '\s+')[0]
+                    if ($firstField -match '^[0-9]+$') {
+                        return [int64]$firstField
+                    }
+                }
+            } catch {
+                Write-Log -Level WARN -Message ("gsutil du failed for {0} in {1}: {2}" -f $BucketName, $Project, ($_.Exception.Message))
+            }
+            # Fallback (can be slow for very large buckets): enumerate objects
+            $sizeBytes = 0
+            try {
+                $sizes = gcloud storage objects list "gs://$BucketName" --project $Project --format="value(size)" 2>$null
+                foreach ($s in $sizes) { if ($s -match '^[0-9]+$') { $sizeBytes += [int64]$s } }
+                return [int64]$sizeBytes
+            } catch {
+                Write-Log -Level WARN -Message ("Fallback object enumeration failed for {0} in {1}: {2}" -f $BucketName, $Project, ($_.Exception.Message))
+            }
+            Write-Log -Level WARN -Message ("Unable to determine size for bucket {0} in {1} (returning 0)." -f $BucketName, $Project)
+            return 0
+        }
+
+        $bucketName = $bucket.name
+        
+        # Get Bucket size in Bytes
+        $sizeBytes = Get-BucketSizeBytes -BucketName $bucketName -Project $projectName
+    if (-not $MinimalOutput) { Write-Host ("[Sizing] Bucket: {0} | Project={1} | SizeBytes={2}" -f $bucketName, $projectName, $sizeBytes) -ForegroundColor DarkGray }
+        
+        # Precise size conversions (binary vs decimal) with more precision
+        $bytes = [int64]$sizeBytes
+        $GiBBytes = 1GB              # 1,073,741,824
+        $MiBBytes = 1MB              # 1,048,576
+        $TiBBytes = $GiBBytes * 1024 # 1,099,511,627,776
+        $GBDecimalDivisor = 1e9
+        $MBDecimalDivisor = 1e6
+        $TBDecimalDivisor = 1e12
+        $sizeMiB     = if ($bytes -gt 0) { [math]::Round($bytes / $MiBBytes, 3) } else { 0 }
+        $sizeGiB     = if ($bytes -gt 0) { [math]::Round($bytes / $GiBBytes, 4) } else { 0 }
+        $sizeTiB     = if ($bytes -gt 0) { [math]::Round($bytes / $TiBBytes, 6) } else { 0 }
+        $sizeMBDec   = if ($bytes -gt 0) { [math]::Round($bytes / $MBDecimalDivisor, 3) } else { 0 }
+        $sizeGBDec   = if ($bytes -gt 0) { [math]::Round($bytes / $GBDecimalDivisor, 4) } else { 0 }
+        $sizeTBDec   = if ($bytes -gt 0) { [math]::Round($bytes / $TBDecimalDivisor, 6) } else { 0 }
+        
+        return [PSCustomObject]@{
+            StorageBucket       = $bucket.name
+            Project             = $projectName
+            Location            = $bucket.location
+            StorageClass        = $bucket.storageClass
+            UsedCapacityBytes   = $bytes
+            UsedCapacityMiB     = $sizeMiB
+            UsedCapacityGiB     = $sizeGiB
+            UsedCapacityTiB     = $sizeTiB
+            UsedCapacityMBDec   = $sizeMBDec
+            UsedCapacityGB      = $sizeGBDec
+            UsedCapacityTB      = $sizeTBDec
+        }
+    }
+
+# MultiThreading - Script for Storage inventory / Project level multithreading
+$projectBucketListingScriptBlock = {
+        param($projectName,$bucketSizingScript)
+
+        Write-Log -Level INFO -Message ("[Child-Project] Starting bucket enumeration for project '{0}'" -f $projectName)
+        $projectSizingStart = Get-Date
+
+        # Step 0 : List buckets in project (permission-aware)
+        $buckets = @()
+        $permissionError = $false
+        $bucketRaw = & gcloud storage buckets list --project $projectName --format=json 2>&1
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            $rawText = ($bucketRaw | Out-String)
+            if ($rawText -match '(?i)permission|denied|forbidden|403') { $permissionError = $true }
+            Write-Log -Level WARN -Message ("[Child-Project] Bucket listing failed for project '{0}' exitCode={1} permissionIssue={2}" -f $projectName,$exitCode,$permissionError)
+            $buckets = @()
+        } else {
+            if ([string]::IsNullOrWhiteSpace(($bucketRaw | Out-String))) {
+                $buckets = @()
+            } else {
+                try { $buckets = $bucketRaw | ConvertFrom-Json } catch { Write-Log -Level ERROR -Message ("[Child-Project] JSON parse failed for project '{0}': {1}" -f $projectName,$_.Exception.Message); $buckets = @() }
+            }
+        }
+        Write-Log -Level DEBUG -Message ("[Child-Project] Retrieved {0} buckets for project '{1}' permissionIssue={2}" -f ($buckets.Count | ForEach-Object { $_ }) , $projectName,$permissionError)
+
+        # Save the bucket list collection to an array for summary
+        $projectBucketCollection = @()
+        $projectBucketCollection += @{
+            Project        = $projectName
+            BucketList     = $buckets
+            BucketCount    = if ($permissionError) { -1 } else { if ($buckets) { $buckets.Count } else { 0 } }
+            PermissionIssue= $permissionError
+        }
+        $bucketCount = $projectBucketCollection[0].BucketCount
+
+        Write-Log -Level INFO -Message ("[Child-Project] Initializing child runspace pool for project '{0}' with bucketCount={1}" -f $projectName, $bucketCount)
+
+        $childMaxThreads = [math]::Min(20, [Math]::Max(1,$bucketCount))
+        $childInitialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+        $childRunspacePool = [runspacefactory]::CreateRunspacePool(1, $childMaxThreads, $childInitialState, $Host)
+        $childRunspacePool.Open()
+
+        Write-Log -Level DEBUG -Message ("[Child-Project] Child runspace pool opened for project '{0}' with maxThreads={1}" -f $projectName, $childMaxThreads)
+
+        # Collections to hold child runspaces and their results
+        $childRunspaceResults = @()
+
+        # Step 1: Invoke Multi Threading at Bucket level to size all buckets in this Project
+        $bucketIndex = 0
+
+        foreach ($bucket in $buckets) {
+            $bucketIndex++
+            Write-Log -Level DEBUG -Message ("[Child-Project] Queue sizing for bucket '{0}' ({1}/{2}) in project '{3}'" -f $bucket.name,$bucketIndex,$bucketCount,$projectName)
+            # Create a new PowerShell instance for the child runspace
+            $childPS = [PowerShell]::Create().AddScript($bucketSizingScript).AddArgument($projectName).AddArgument($bucket)
+
+            # Assign the child runspace to the child Runspace Pool
+            $childPS.RunspacePool = $childRunspacePool
+
+            # Begin asynchronous execution of the child runspace
+            $childAsyncHandle = $childPS.BeginInvoke()
+
+            # Note the child invoke time
+            $childInvokeTime = Get-Date -Format "HH:mm"
+
+            # Store the runspace and its handle for later retrieval
+            $childRunspaceResults += [PSCustomObject]@{
+                PowerShellInstance      = $childPS
+                Handle                  = $childAsyncHandle
+                Bucket                  = $bucket.name
+                InvokeTime              = $childInvokeTime
+                Index                   = $bucketIndex
+                Total                   = $bucketCount
+            }
+        }
+
+        # Step 2: Collect results as they complete
+        $completedCount = 0
+        $bucketResults = @()
+        foreach ($child in $childRunspaceResults) {
+            $bucketStartPerf = Get-Date
+            $result = $child.PowerShellInstance.EndInvoke($child.Handle)
+            $bucketEndPerf = Get-Date
+            $completedCount++
+
+            $startTime = $child.InvokeTime
+
+            # Use correct property name returned by bucket sizing block (StorageBucket)
+            # Simplified bucket output
+            Write-Host ("Bucket={0} Project={1} Location={2} SizeGB={3}" -f $result.StorageBucket, $result.Project, $result.Location, ($result.UsedCapacityGB)) -ForegroundColor Cyan
+            $bucketResults += $result
+            $elapsedMin = [math]::Round(($bucketEndPerf - $bucketStartPerf).TotalMinutes,4)
+            if (-not $elapsedMin) { $elapsedMin = 0 }
+            Write-Log -Level DEBUG -Message ("[Child-Project] Completed sizing for bucket '{0}' ({1}/{2}) in project '{3}' elapsedMin={4:N4}" -f $result.StorageBucket,$child.Index,$child.Total,$projectName,$elapsedMin)
+            # Cumulative project progress / elapsed time log
+            if ($bucketCount -gt 0) {
+                $projectElapsedMin = [math]::Round(([DateTime]::UtcNow - $projectSizingStart.ToUniversalTime()).TotalMinutes,3)
+                if (-not $projectElapsedMin) { $projectElapsedMin = 0 }
+                $overallPct = [math]::Round(($completedCount / $bucketCount) * 100,1)
+                if (-not $MinimalOutput) { Write-Host ("[Bucket-Progress] Project={0} Completed={1}/{2} ({3}%) ProjectElapsedMin={4:N3}" -f $projectName,$completedCount,$bucketCount,$overallPct,[double]$projectElapsedMin) -ForegroundColor DarkYellow }
+            }
+            
+
+
+            
+            # Dispose the PowerShell instance to free resources
+            $child.PowerShellInstance.Dispose()
+        }
+
+        # Close the child Runspace Pool
+        $childRunspacePool.Close()
+        $childRunspacePool.Dispose()
+        Write-Log -Level INFO -Message ("[Child-Project] Completed all bucket sizings for project '{0}'. BucketsProcessed={1}" -f $projectName,$bucketResults.Count)
+        $totalProjectElapsedMin = [math]::Round((Get-Date - $projectSizingStart).TotalMinutes,3)
+    Write-Host ("Project={0} BucketsProcessed={1} ElapsedMin={2}" -f $projectName,$bucketResults.Count,$totalProjectElapsedMin) -ForegroundColor Green
+        
+        # Return bucket results to parent controller
+        return [pscustomobject]@{
+            Project        = $projectName
+            BucketCount    = $bucketCount
+            BucketResult   = $bucketResults
+            PermissionIssue= $permissionError
+        }
+    }
+
+
 # -------------------------
 # Storage Inventory (fast, gcloud-only)
 # -------------------------
@@ -428,90 +597,179 @@ function Get-GcpStorageInventory {
     param([string[]]$ProjectIds)
 
     $StorageBuckets = @()
+    $projectStatuses = @()
     $projIndex = 0
 
+    # Concurrent dictionary to store bucket info (thread-safe)
+    $StorageBucketsMap = [System.Collections.Concurrent.ConcurrentDictionary[string,
+                        System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]]::new()
+
+    
+    # Determine maximum parent threads (project-level concurrency)
+    $parentMaxThreads = [math]::Min(5, $ProjectIds.Count)  # Limit to 5 concurrent projects to avoid API rate limits
+    Write-Log -Level INFO -Message ("[Parent] Calculated parentMaxThreads={0} for {1} projects" -f $parentMaxThreads,$ProjectIds.Count)
+
+    # Invoke MultiThreading - List buckets in project (min(Project.Count,5))
+    $parentInitialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+
+    Write-Log "Starting Multi Threading at Project level with max {$parentMaxThreads} threads for project bucket listing."
+    
+    # Creating a parent Runspace Pool wiht a maximum of $parentMaxThreads threads
+    $parentRunspacePool = [runspacefactory]::CreateRunspacePool(1, $parentMaxThreads, $parentInitialState, $Host)
+    
+    # Open the parent Runspace Pool
+    $parentRunspacePool.Open()
+    
+    # Collections to hold parent runspaces and their results ???? works with multi multi threading ???? not sure
+    $parentRunspaceResults = @()
+
+            
+    # Step 1: Invoke Multi Threading at Project level to get all bucket info in all Projects first
     foreach ($proj in $ProjectIds) {
-        $projIndex++
-        Write-Progress -Id 3 -Activity "Processing Storage" `
-            -Status "Project $proj ($projIndex/$($ProjectIds.Count))" `
-            -PercentComplete ([math]::Round(($projIndex / $ProjectIds.Count) * 100, 1))
+    Write-Log -Level DEBUG -Message ("[Parent] Queue project '{0}' for bucket discovery/sizing" -f $proj)
 
-        Write-Host "`n=== Storage Project: $proj ===" -ForegroundColor Yellow
+        # Create a new PowerShell instance for the parent runspace
+    $parentPS = [PowerShell]::Create().AddScript($projectBucketListingScriptBlock).AddArgument($proj).AddArgument($bucketSizingScriptBlock)
 
-        $bucketList = @()
-        try {
-            $bucketList = gcloud storage buckets list --project $proj --format=json | ConvertFrom-Json
-        } catch {
-            Write-Warning "Failed to list buckets in ${proj}: $_"
-            $bucketList = @()
+        # Assign the parent runspace to the parent Runspace Pool
+        $parentPS.RunspacePool = $parentRunspacePool
+
+        # Begin asynchronous execution of the parent runspace
+        $parentAsyncHandle = $parentPS.BeginInvoke()
+
+        # Note the parent invoke time
+        $parentInvokeTime = Get-Date -Format "HH:mm"
+
+        # Store the runspace and its handle for later retrieval
+        $parentRunspaceResults += [PSCustomObject]@{
+            PowerShellInstance = $parentPS
+            Handle             = $parentAsyncHandle
+            Project            = $proj
+            InvokeTime         = $parentInvokeTime   # string HH:mm for display
+            StartTimestamp     = [DateTime]::UtcNow  # precise timing for duration metrics
         }
-
-        $bCount = 0
-        $bTotal = ($bucketList | Measure-Object).Count
-
-    foreach ($bucket in $bucketList) {
-            $bCount++
-            $percent = if ($bTotal) { [math]::Round(($bCount / $bTotal) * 100, 1) } else { 100 }
-            Write-Progress -Id 4 -ParentId 3 -Activity "Sizing Buckets" `
-                -Status "Bucket $bCount of ${bTotal}: $($bucket.name)" `
-                -PercentComplete $percent
-
-            # Inner per-bucket workload progress (3 steps) - reset per bucket
-            $bucketWorkTotal = 3
-            $bucketWorkStep = 0
-            function Update-BucketWorkProgress {
-                param([string]$Phase,[int]$Current,[int]$Total)
-                if ($Total -le 0) { $Total = 1 }
-                $pctRaw = ($Current / $Total) * 100
-                if ($pctRaw -gt 100) { $pctRaw = 100 }
-                $pct = [math]::Round($pctRaw,0)
-                Write-Progress -Id 41 -ParentId 4 -Activity "Bucket Workload" -Status ("{0} ({1}/{2})" -f $Phase,$Current,$Total) -PercentComplete $pct
-            }
-            $bucketWorkStep++; Update-BucketWorkProgress -Phase "Measuring Size" -Current $bucketWorkStep -Total $bucketWorkTotal
-
-            $sizeBytes = Get-BucketSizeBytes -BucketName $bucket.name -Project $proj
-
-            # Precise size conversions (binary vs decimal) with more precision
-            $bytes = [int64]$sizeBytes
-            $GiBBytes = 1GB              # 1,073,741,824
-            $MiBBytes = 1MB              # 1,048,576
-            $TiBBytes = $GiBBytes * 1024 # 1,099,511,627,776
-            $GBDecimalDivisor = 1e9
-            $MBDecimalDivisor = 1e6
-            $TBDecimalDivisor = 1e12
-
-            $sizeMiB     = if ($bytes -gt 0) { [math]::Round($bytes / $MiBBytes, 3) } else { 0 }
-            $sizeGiB     = if ($bytes -gt 0) { [math]::Round($bytes / $GiBBytes, 4) } else { 0 }
-            $sizeTiB     = if ($bytes -gt 0) { [math]::Round($bytes / $TiBBytes, 6) } else { 0 }
-            $sizeMBDec   = if ($bytes -gt 0) { [math]::Round($bytes / $MBDecimalDivisor, 3) } else { 0 }
-            $sizeGBDec   = if ($bytes -gt 0) { [math]::Round($bytes / $GBDecimalDivisor, 4) } else { 0 }
-            $sizeTBDec   = if ($bytes -gt 0) { [math]::Round($bytes / $TBDecimalDivisor, 6) } else { 0 }
-
-            $bucketWorkStep++; Update-BucketWorkProgress -Phase "Recording Bucket" -Current $bucketWorkStep -Total $bucketWorkTotal
-            $StorageBuckets += [PSCustomObject]@{
-                StorageBucket       = $bucket.name
-                Project             = $proj
-                Location            = $bucket.location
-                StorageClass        = $bucket.storageClass
-                UsedCapacityBytes   = $bytes
-                UsedCapacityMiB     = $sizeMiB
-                UsedCapacityGiB     = $sizeGiB
-                UsedCapacityTiB     = $sizeTiB
-                UsedCapacityMBDec   = $sizeMBDec
-                UsedCapacityGB      = $sizeGBDec
-                UsedCapacityTB      = $sizeTBDec
-            }
-
-            Write-Host ("[BUCKET] {0} | {1}/{2} ({3}%) | Name={4} | Loc={5} | Class={6} | Bytes={7} | GiB={8} | GB(dec)={9}" -f $proj,$bCount,$bTotal,$percent,$bucket.name,$bucket.location,$bucket.storageClass,$bytes,$sizeGiB,$sizeGBDec) -ForegroundColor DarkGreen
-            Write-Log "Collected bucket: $($bucket.name) in ${proj}, bytes: $bytes, sizeGiB: $sizeGiB, sizeGB(dec): $sizeGBDec"
-            $bucketWorkStep++; Update-BucketWorkProgress -Phase "Completed" -Current $bucketWorkStep -Total $bucketWorkTotal
-            Write-Progress -Id 41 -Activity "Bucket Workload" -Completed
-        }
-
-        Write-Progress -Id 4 -Activity "Sizing Buckets" -Completed
+        Write-Log -Level DEBUG -Message ("[Parent] Started runspace for project '{0}' invokeTime={1}" -f $proj,$parentInvokeTime)
     }
 
+    Write-Log -Level INFO -Message ("[Parent] All project runspaces submitted. Count={0} Closing pool to new tasks." -f $parentRunspaceResults.Count)
+
+    # Do NOT close/dispose the parent runspace pool yet; we still need EndInvoke results
+
+    # Step 2: Collect results as they complete
+    $completedCount = 0
+    $parentProjectsTotal = $ProjectIds.Count
+    $cumulativeBucketCount = 0
+    $cumulativeBucketsCompleted = 0
+    $totalKnownBuckets = 0
+    $completedProjectDurations = New-Object System.Collections.Generic.List[double]
+    # Consolidated bucket sizing progress tracking
+    $cumulativeSizedBuckets = 0
+    $cumulativeSizedBytes   = 0
+    Write-Progress -Id 410 -Activity "Bucket Sizing" -Status "Waiting for first project..." -PercentComplete 0
+    Write-Log -Level INFO -Message ("[Parent] Project collection phase started. TotalProjects={0}" -f $parentProjectsTotal)
+    # Capture start as a concrete DateTime instance (avoid any alias issues)
+    $parentStart = [DateTime]::UtcNow
+    foreach ($parent in $parentRunspaceResults) {
+        $projCollectStart = Get-Date
+        $projNameForLog = if ($parent.Project) { $parent.Project } else { '<UnknownProject>' }
+        Write-Log -Level DEBUG -Message ("[Parent] Waiting for project '{0}' results" -f $projNameForLog)
+        try {
+            $result = $parent.PowerShellInstance.EndInvoke($parent.Handle)
+        } catch {
+            Write-Log -Level ERROR -Message ("[Parent] EndInvoke failed for project '{0}': {1}" -f $projNameForLog,$_.Exception.Message)
+            $result = $null
+        }
+        $projCollectEnd = Get-Date
+        $completedCount++
+        $proj = $parent.Project
+        $startTime = $parent.InvokeTime
+    $permissionIssue = $false
+    if ($result -and $result.PSObject.Properties['PermissionIssue']) { $permissionIssue = [bool]$result.PermissionIssue }
+    $bucketCount = if ($result -and $result.BucketCount -ge 0) { $result.BucketCount } elseif ($permissionIssue) { -1 } else { 0 }
+        $buckets = if ($result) { $result.BucketResult } else { @() }
+
+    $elapsedParentMin = [math]::Round(($projCollectEnd - $projCollectStart).TotalMinutes,4)
+    Write-Log -Level DEBUG -Message ("[Parent] Retrieved results for project '{0}' bucketsReported={1} collectionElapsedMin={2}" -f $proj,$bucketCount,$elapsedParentMin)
+
+        # Total project elapsed (from submission to completion)
+        $projectElapsedTotalMin = $null
+        if ($parent.StartTimestamp -is [DateTime]) {
+            $projectElapsedTotalMin = [math]::Round(([DateTime]::UtcNow - $parent.StartTimestamp).TotalMinutes,4)
+            $completedProjectDurations.Add($projectElapsedTotalMin) | Out-Null
+        }
+        if ($bucketCount -gt 0) {
+            $cumulativeBucketCount += $bucketCount
+            $cumulativeBucketsCompleted += $bucketCount  # all buckets in this project are finished now
+            $totalKnownBuckets += $bucketCount
+        }
+
+        # Calculate averages & ETA (informational only)
+        $avgProjectMin = if ($completedProjectDurations.Count -gt 0) { [math]::Round(($completedProjectDurations | Measure-Object -Average | Select-Object -ExpandProperty Average),3) } else { 0 }
+        $remainingProjects = $parentProjectsTotal - $completedCount
+        $etaRemainingMin = if ($avgProjectMin -gt 0 -and $remainingProjects -gt 0) { [math]::Round($avgProjectMin * $remainingProjects,3) } else { 0 }
+        Write-Log -Level INFO -Message ("[Parent] ProjectDone={0} BucketsThis={1} CumulativeBuckets={2} ProjElapsedMin={3} AvgProjMin={4} ETA_RemainingMin={5}" -f $proj,$bucketCount,$cumulativeBucketCount,$projectElapsedTotalMin,$avgProjectMin,$etaRemainingMin)
+
+        # Update consolidated bucket sizing progress ONLY after project completion
+        if ($buckets -and $buckets.Count -gt 0) {
+            $projSizedBytes = ($buckets | Measure-Object UsedCapacityBytes -Sum).Sum
+            if ($projSizedBytes) { $cumulativeSizedBytes += $projSizedBytes }
+            $cumulativeSizedBuckets += $buckets.Count
+        }
+        if ($parentProjectsTotal -gt 0) {
+            $parentPct = [math]::Round(($completedCount / $parentProjectsTotal) * 100,1)
+            $overallGB = if ($cumulativeSizedBytes -gt 0) { [math]::Round($cumulativeSizedBytes/1e9,3) } else { 0 }
+            $statusLine = "Projects {0}/{1} ({2}%) | BucketsSized={3} | SizedGB={4}" -f $completedCount,$parentProjectsTotal,$parentPct,$cumulativeSizedBuckets,$overallGB
+            Write-Progress -Id 410 -Activity "Bucket Sizing" -Status $statusLine -PercentComplete $parentPct
+        }
+        # (Optional) retain old detailed bars only when verbose
+        if (-not $MinimalOutput) {
+            if ($parentProjectsTotal -gt 0) {
+                $parentPctVerbose = [math]::Round(($completedCount / $parentProjectsTotal) * 100,1)
+                $statusLineVerbose = "Project {0}/{1} ({2}%): {3} | BucketsThis={4} CumBuckets={5}" -f $completedCount,$parentProjectsTotal,$parentPctVerbose,$proj,$bucketCount,$cumulativeBucketCount
+                Write-Progress -Id 301 -Activity "Storage Projects" -Status $statusLineVerbose -PercentComplete $parentPctVerbose
+            }
+        }
+
+        Write-Host ("=== Project: {0} | Buckets: {1} | Started at: {2} ===" -f $proj, $bucketCount, $startTime) -ForegroundColor Yellow
+
+        if ($buckets) {
+            foreach ($b in $buckets) {
+                $StorageBuckets += $b
+            }
+        }
+
+        # Record project status (BucketCount -1 => permission issue; display * suffix and blank count)
+        $displayProj = if ($permissionIssue) { "$proj*" } else { $proj }
+        $bucketCountForCsv = if ($bucketCount -lt 0) { '' } else { $bucketCount }
+        $projectStatuses += [pscustomobject]@{
+            Project         = $displayProj
+            BucketCount     = $bucketCountForCsv
+            PermissionIssue = if ($permissionIssue) { 'Y' } else { '' }
+        }
+
+        # Dispose the PowerShell instance to free resources
+        $parent.PowerShellInstance.Dispose()
+    }
+
+    # Now it's safe to close/dispose after all EndInvoke calls
+    $parentRunspacePool.Close()
+    $parentRunspacePool.Dispose()
+
+    $totalElapsedOverallMin = [math]::Round(([DateTime]::UtcNow - $parentStart).TotalMinutes,3)
+    Write-Log -Level INFO -Message ("[Parent] Completed processing all project runspaces. TotalProjects={0} TotalBuckets={1} TotalElapsedMin={2}" -f $parentRunspaceResults.Count,$StorageBuckets.Count,$totalElapsedOverallMin)
+    Write-Progress -Id 410 -Activity "Bucket Sizing" -Completed
+    if (-not $MinimalOutput) {
+        Write-Progress -Id 302 -Activity "Storage Buckets" -Completed
+        Write-Progress -Id 301 -Activity "Storage Projects" -Completed
+    }
+
+
+
+
+        
     Write-Progress -Id 3 -Activity "Processing Storage" -Completed
+    # Expose project status list for later CSV rendering
+    $script:StorageProjectStatuses = $projectStatuses
     return $StorageBuckets
 }
 
@@ -653,14 +911,14 @@ if ($Selected.VM -and $invResults.VMs -and $invResults.VMs.Count) {
     Add-VmInfoSummary -Path $vmCsv -VmData $invResults.VMs
 
     if ($invResults.AttachedDisks -and $invResults.AttachedDisks.Count) {
-        $attachedCsv = Join-Path $outDir ("gcp_disks_attached_to_vm_instances_" + $dateStr + ".csv")
+    $attachedCsv = Join-Path $outDir ("gcp_disks_attached_to_vm_instances_" + $dateStr + ".csv")
         Write-PlainCsv -Data $invResults.AttachedDisks -Path $attachedCsv
         Write-Host "Attached disks CSV written: $(Split-Path $attachedCsv -Leaf)" -ForegroundColor Cyan
     Add-DiskSummary -Path $attachedCsv -DiskData $invResults.AttachedDisks -Title 'Attached Disks'
     }
 
     if ($invResults.UnattachedDisks -and $invResults.UnattachedDisks.Count) {
-        $unattachedCsv = Join-Path $outDir ("gcp_disks_unattached_to_vm_instances_" + $dateStr + ".csv")
+    $unattachedCsv = Join-Path $outDir ("gcp_disks_unattached_to_vm_instances_" + $dateStr + ".csv")
         Write-PlainCsv -Data $invResults.UnattachedDisks -Path $unattachedCsv
         Write-Host "Unattached disks CSV written: $(Split-Path $unattachedCsv -Leaf)" -ForegroundColor Cyan
     Add-DiskSummary -Path $unattachedCsv -DiskData $invResults.UnattachedDisks -Title 'Unattached Disks'
@@ -673,6 +931,8 @@ if ($Selected.STORAGE -and $invResults.StorageBuckets -and $invResults.StorageBu
     Write-Host "Buckets CSV written: $(Split-Path $bktCsv -Leaf)" -ForegroundColor Cyan
     Add-BucketSummary -Path $bktCsv -Buckets $invResults.StorageBuckets
 }
+
+
 
 # -------------------------
 # Build Summary (Custom ordering with spacer rows)
@@ -705,7 +965,7 @@ if (($Selected.VM -and $vmData) -and ($Selected.STORAGE -and $bucketData)) {
     if (-not $overallBucketBytes) { $overallBucketBytes = 0 }
     $overallBucketGB = [math]::Round($overallBucketBytes/1e9,3)
     $combinedGB = [math]::Round(($overallDiskSizeGB + $overallBucketGB),3)
-    $summaryRows += [PSCustomObject]@{Level='Overall';ResourceType='AllResources';Project='All';Region='All';Zone='All';Count=($vmData.Count + $bucketData.Count);TotalSizeGB=$combinedGB;TotalSizeTB=[math]::Round($combinedGB/1e3,4);TotalSizeTiB=[math]::Round($combinedGB/1024,4)}
+    $summaryRows += [PSCustomObject]@{Level='Overall';ResourceType='AllResources';Project='All';Region='All';Zone='All';Count='N/A';TotalSizeGB=$combinedGB;TotalSizeTB=[math]::Round($combinedGB/1e3,4);TotalSizeTiB=[math]::Round($combinedGB/1024,4)}
 }
 
 # Individual overall rows
@@ -813,7 +1073,8 @@ Write-Host "Inventory summary exported: $(Split-Path $summaryCsv -Leaf)" -Foregr
 # Finalize log, then ZIP
 # -------------------------
 Write-Progress -Id 5 -Activity "Generating Output Files" -Status "Finalizing log..." -PercentComplete 75
-Stop-Transcript | Out-Null   # ensure log is fully flushed before zipping
+Stop-Transcript | Out-Null   # end transcript (separate from detail log)
+
 
 Write-Progress -Id 5 -Activity "Generating Output Files" -Status "Creating ZIP archive..." -PercentComplete 90
 $zipFile = Join-Path $PWD ("gcp_sizing_" + $dateStr + ".zip")
