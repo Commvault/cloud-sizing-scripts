@@ -620,7 +620,7 @@ function Get-GcpStorageInventory {
     # Open the parent Runspace Pool
     $parentRunspacePool.Open()
     
-    # Collections to hold parent runspaces and their results ???? works with multi multi threading ???? not sure
+    # Collections to hold parent runspaces and their results
     $parentRunspaceResults = @()
 
             
