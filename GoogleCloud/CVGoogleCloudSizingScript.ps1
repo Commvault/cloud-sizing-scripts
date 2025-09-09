@@ -13,89 +13,140 @@
 .PARAMETER Types
     Optional. Restrict inventory to specific resource types. Valid values: VM, Storage.
     If omitted, both VMs and Storage will be inventoried.
-
+    Accepts any of the following forms:
+        -Types VM,Storage              (unquoted comma-separated list)
+        -Types "VM"                    (single type)
+        -Types "VM","Storage"        (standard string array)
+        -Types "VM,Storage"            (single quoted comma-separated string, case insensitive)
+        
 .PARAMETER Projects
-    Optional. Target specific GCP projects by name or ID. If omitted, all accessible projects will be processed.
+        Optional. Target specific GCP projects by name or ID. If omitted, all accessible projects will be processed.
+        Accepts any of the following forms:
+            -Projects proj1,proj2              (unquoted comma-separated list)
+            -Projects "proj1"                  (single project)
+            -Projects "proj1","proj2"        (standard string array)
+            -Projects "proj1,proj2"          (single quoted comma-separated string)
 
 .OUTPUTS
-    Creates timestamped output directory with:
-    - gcp_vm_info_YYYY-MM-DD_HHMMSS.csv
-    - gcp_disks_attached_to_vms_YYYY-MM-DD_HHMMSS.csv
-    - gcp_disks_unattached_to_vms_YYYY-MM-DD_HHMMSS.csv
-    - gcp_storage_buckets_info_YYYY-MM-DD_HHMMSS.csv
-    - gcp_inventory_summary_YYYY-MM-DD_HHMMSS.csv
-    - gcp_sizing_script_output_YYYY-MM-DD_HHMMSS.log
-    - gcp_sizing_YYYY-MM-DD_HHMMSS.zip
+        Runtime creates a timestamped working directory (gcp-inv-YYYY-MM-DD_HHMMSS) containing:
+            - gcp_vm_instance_info_YYYY-MM-DD_HHMMSS.csv                (VM inventory)
+            - gcp_disks_attached_to_vm_instances_YYYY-MM-DD_HHMMSS.csv  (attached disks)
+            - gcp_disks_unattached_to_vm_instances_YYYY-MM-DD_HHMMSS.csv(unattached disks)
+            - gcp_storage_buckets_info_YYYY-MM-DD_HHMMSS.csv   (bucket inventory)
+            - gcp_inventory_summary_YYYY-MM-DD_HHMMSS.csv      (summary rollups)
+            - gcp_sizing_script_output_YYYY-MM-DD_HHMMSS.log   (transcript/log)
+        These files are zipped into:
+            - gcp_sizing_YYYY-MM-DD_HHMMSS.zip
+        After the ZIP is created the working directory is deleted; only the ZIP archive remains.
 
 .NOTES
     Requires Google Cloud SDK (gcloud CLI and gsutil) installed and authenticated.
     Must be run by a user with appropriate GCP permissions.
+
+
+    SETUP INSTRUCTIONS FOR GOOGLE CLOUD SHELL (Recommended):
+
+    1. Learn about Google Cloud Shell:
+        Visit: https://cloud.google.com/shell/docs
+
+    2. Verify GCP permissions:
+        Ensure your Google account has "Viewer" or higher role on target projects.
+
+    3. Access Google Cloud Shell:
+        - Login to Google Cloud Console with your account
+        - Open Google Cloud Shell
+        - Enter PowerShell mode, by executing the command:
+            pwsh
+
+    4. Upload this script:
+        Use the Cloud Shell file upload feature to upload CVGoogleCloudSizingScript.ps1
+        - run chmod +x CVGoogleCloudSizingScript.ps1 to allow the script execution permissions
+
+    5. Run the script:
+        # For all workload, all Projects
+        ./CVGoogleCloudSizingScript.ps1
+
+        # For specific workloads, all Projects
+        ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+
+        # For all workload, specific Projects
+        ./CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
+
+        # For specific workloads, specific Projects
+        ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
+
+
+    SETUP INSTRUCTIONS FOR LOCAL SYSTEM:
+
+    1. Install PowerShell 7:
+        Download from: https://github.com/PowerShell/PowerShell/releases
+
+    2. Install Google Cloud SDK:
+        Download from: https://cloud.google.com/sdk/docs/install
+
+    3. Authenticate with GCP:
+        gcloud auth login
+
+    4. Verify permissions:
+        Ensure your account has "Viewer" or higher role on target projects
+
+    5. Run the script:
+        # For all workload, all Projects
+        ./CVGoogleCloudSizingScript.ps1
+
+        # For specific workloads, all Projects
+        ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+
+        # For all workload, specific Projects
+        ./CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
+
+        # For specific workloads, specific Projects
+        ./CVGoogleCloudSizingScript.ps1 -Types VM -Projects my-gcp-project-1,my-gcp-project-2
+
+    EXAMPLE USAGE
+    -------------
+        .\CVGoogleCloudSizingScript.ps1
+        # Inventories VMs and Storage Buckets in all accessible projects
+
+        .\CVGoogleCloudSizingScript.ps1 -Types VM,Storage
+        # Explicitly inventories VMs and Storage Buckets in all projects (same as default)
+
+        .\CVGoogleCloudSizingScript.ps1 -Types VM
+        # Only inventories Compute Engine VMs in all projects
+
+        .\CVGoogleCloudSizingScript.ps1 -Projects my-gcp-project-1,my-gcp-project-2
+        # Inventories VMs and Storage Buckets in only the specified projects
+
+        .\CVGoogleCloudSizingScript.ps1 -Types Storage -Projects my-gcp-project-1
+        # Only inventories Storage Buckets in the specified project
 #>
 
-
-<#
-SETUP INSTRUCTIONS FOR GOOGLE CLOUD SHELL (Recommended):
-
-1. Learn about Google Cloud Shell:
-    Visit: https://cloud.google.com/shell/docs
-
-2. Verify GCP permissions:
-    Ensure your Google account has "Viewer" or higher role on target projects.
-
-3. Access Google Cloud Shell:
-    - Login to Google Cloud Console with your account
-    - Open Google Cloud Shell
-
-4. Upload this script:
-    Use the Cloud Shell file upload feature to upload CVGoogleCloudSizingScript.ps1
-
-5. Run the script:
-    ./CVGoogleCloudSizingScript.ps1
-    ./CVGoogleCloudSizingScript.ps1 -Types VM,Storage
-    ./CVGoogleCloudSizingScript.ps1 -Projects "my-gcp-project-1","my-gcp-project-2"
-
-SETUP INSTRUCTIONS FOR LOCAL SYSTEM:
-
-1. Install PowerShell 7:
-    Download from: https://github.com/PowerShell/PowerShell/releases
-
-2. Install Google Cloud SDK:
-    Download from: https://cloud.google.com/sdk/docs/install
-
-3. Authenticate with GCP:
-    gcloud auth login
-
-4. Verify permissions:
-    Ensure your account has "Viewer" or higher role on target projects
-
-5. Run the script:
-    .\CVGoogleCloudSizingScript.ps1
-    .\CVGoogleCloudSizingScript.ps1 -Types VM
-    .\CVGoogleCloudSizingScript.ps1 -Projects "my-gcp-project"
-
-EXAMPLE USAGE
--------------
-     .\CVGoogleCloudSizingScript.ps1
-     # Inventories VMs and Storage Buckets in all accessible projects
-
-     .\CVGoogleCloudSizingScript.ps1 -Types VM,Storage
-     # Explicitly inventories VMs and Storage Buckets in all projects (same as default)
-
-     .\CVGoogleCloudSizingScript.ps1 -Types VM
-     # Only inventories Compute Engine VMs in all projects
-
-     .\CVGoogleCloudSizingScript.ps1 -Projects "my-gcp-project-1","my-gcp-project-2"
-     # Inventories VMs and Storage Buckets in only the specified projects
-
-     .\CVGoogleCloudSizingScript.ps1 -Types Storage -Projects "my-gcp-project-1"
-     # Only inventories Storage Buckets in the specified project
-#>
 
 param(
-    [ValidateSet("VM","Storage", IgnoreCase=$true)]
+    # NOTE: Manual validation performed after normalization to allow inputs like -Types "VM,Storage"
     [string[]]$Types,
     [string[]]$Projects
 )
+
+# Normalize -Projects if provided as a single comma-separated string inside quotes
+if ($Projects -and $Projects.Count -eq 1 -and $Projects[0] -match ',') {
+    $Projects = $Projects[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+
+# Normalize -Types if provided as a single comma-separated string inside quotes
+if ($Types -and $Types.Count -eq 1 -and $Types[0] -match ',') {
+    $Types = $Types[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+
+# Post-normalization validation for -Types (case-insensitive)
+if ($Types) {
+    $allowed = @('VM','STORAGE')
+    $bad = $Types | Where-Object { $allowed -notcontains ($_.Trim().ToUpper()) }
+    if ($bad.Count -gt 0) {
+        Write-Error ("Invalid value(s) for -Types: {0}. Valid values: VM, Storage" -f ($bad -join ', '))
+        return
+    }
+}
 
 # Minimal logging mode (set to $false to re-enable verbose progress lines)
 $MinimalOutput = $true
@@ -129,19 +180,12 @@ $ResourceTypeMap = @{
 
 # Normalize types
 if ($Types) {
+    # Already validated; convert to uppercase normalized set
     $Types = $Types | ForEach-Object { $_.Trim().ToUpper() }
     $Selected = @{}
-    foreach ($t in $Types) {
-        if ($ResourceTypeMap.ContainsKey($t)) { $Selected[$t] = $true }
-    }
-    if ($Selected.Count -eq 0) {
-        Write-Host "No valid -Types specified. Use: VM, Storage"
-        exit 1
-    }
-} else {
-    $Selected = @{}
-    $ResourceTypeMap.Keys | ForEach-Object { $Selected[$_] = $true }
-}
+    foreach ($t in $Types) { if ($ResourceTypeMap.ContainsKey($t)) { $Selected[$t] = $true } }
+    if ($Selected.Count -eq 0) { Write-Host "No valid -Types specified. Use: VM, Storage"; exit 1 }
+} else { $Selected = @{}; $ResourceTypeMap.Keys | ForEach-Object { $Selected[$_] = $true } }
 
 # -------------------------
 # Helpers
@@ -309,7 +353,7 @@ function Get-GcpVMInventory {
         $avgMin = if ($durations.Count -gt 0) { [math]::Round(($durations | Measure-Object -Average | Select -Expand Average),3) } else { 0 }
         $remaining = $total - $completed; $etaMin = if ($avgMin -gt 0 -and $remaining -gt 0) { [math]::Round($avgMin * $remaining,2) } else { 0 }
         $rate = if ($elapsedMin -gt 0) { [math]::Round($allVMs.Count / ($elapsedMin*60),2) } else { 0 }
-        $status = "Projects {0}/{1} ({2}%) | CumVMs={3} | Rate={4}/s | ElapsedMin={5} | ETA_Min={6}" -f $completed,$total,$pct,$allVMs.Count,$rate,$elapsedMin,$etaMin
+        $status = "Projects {0}/{1} ({2}%) | Discovered VMs={3} | Rate={4}/s | ElapsedMin={5} | ETA_Min={6}" -f $completed,$total,$pct,$allVMs.Count,$rate,$elapsedMin,$etaMin
         Write-Progress -Id 101 -Activity 'VM Projects' -Status $status -PercentComplete $pct
         if ($runspaces.Count -gt 0) { Start-Sleep -Milliseconds 200 }
     }
@@ -530,16 +574,28 @@ function Get-GcpStorageInventory {
 # Execution Flow
 # -------------------------
 $allProjects = Get-GcpProjects
+# Additional normalization & case-insensitive resolution for user-specified projects
 if ($Projects) {
-    $targetProjects = $Projects | Where-Object { $allProjects -contains $_ }
-    if (-not $targetProjects) {
-        Write-Error "No valid projects found from provided list."
+    # Trim & dedupe input list
+    $Projects = $Projects | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique
+    # Build case-insensitive lookup of all accessible projects
+    $allLookup = @{}
+    foreach ($p in $allProjects) { $allLookup[$p.ToLower()] = $p }
+    $resolved=@(); $invalid=@()
+    foreach ($p in $Projects) {
+        $k = $p.ToLower()
+        if ($allLookup.ContainsKey($k)) { $resolved += $allLookup[$k] } else { $invalid += $p }
+    }
+    if ($invalid.Count -gt 0) {
+        Write-Warning ("Ignoring invalid project id(s): {0}" -f ($invalid -join ', '))
+    }
+    $targetProjects = $resolved | Select-Object -Unique
+    if (-not $targetProjects -or $targetProjects.Count -eq 0) {
+        Write-Error "No valid projects found from provided -Projects list."
         Stop-Transcript | Out-Null
         exit 1
     }
-} else {
-    $targetProjects = $allProjects
-}
+} else { $targetProjects = $allProjects }
 Write-Host "Targeting $($targetProjects.Count) projects." -ForegroundColor Green
 
 $invResults = @{}
