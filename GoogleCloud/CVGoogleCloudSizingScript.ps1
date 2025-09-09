@@ -55,11 +55,11 @@
     3. Access Google Cloud Shell:
         - Login to Google Cloud Console with your account
         - Open Google Cloud Shell
-        - Enter PowerShell mode, by executing the command:
-            pwsh
 
     4. Upload this script:
         Use the Cloud Shell file upload feature to upload CVGoogleCloudSizingScript.ps1
+        - Enter PowerShell mode, by executing the command:
+            pwsh
         - run chmod +x CVGoogleCloudSizingScript.ps1 to allow the script execution permissions
 
     5. Run the script:
