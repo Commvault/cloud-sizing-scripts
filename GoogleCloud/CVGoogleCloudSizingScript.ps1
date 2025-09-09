@@ -138,6 +138,9 @@ if ($Types -and $Types.Count -eq 1 -and $Types[0] -match ',') {
     $Types = $Types[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 }
 
+# Enforce non-interactive execution for all gcloud commands
+$env:CLOUDSDK_CORE_DISABLE_PROMPTS = '1'
+
 # Post-normalization validation for -Types (case-insensitive)
 if ($Types) {
     $allowed = @('VM','STORAGE')
@@ -192,7 +195,8 @@ if ($Types) {
 # -------------------------
 function Get-GcpProjects {
     try {
-        $json = gcloud projects list --format=json | ConvertFrom-Json
+    # Added --quiet to suppress any interactive prompt
+    $json = gcloud --quiet projects list --format=json | ConvertFrom-Json
         if (-not $json) { throw "No projects returned by gcloud." }
         return $json.projectId
     } catch {
@@ -404,7 +408,7 @@ $bucketSizingScriptBlock = {
             # Fallback (can be slow for very large buckets): enumerate objects
             $sizeBytes = 0
             try {
-                $sizes = gcloud storage objects list "gs://$BucketName" --project $Project --format="value(size)" 2>$null
+                $sizes = gcloud --quiet storage objects list "gs://$BucketName" --project $Project --format="value(size)" 2>$null
                 foreach ($s in $sizes) { if ($s -match '^[0-9]+$') { $sizeBytes += [int64]$s } }
                 return [int64]$sizeBytes
             } catch {
@@ -464,7 +468,8 @@ function Get-GcpStorageInventory {
         param($project,$minimalFlag)
         $perm=$false; $buckets=@(); $err=$null
         try {
-            $raw = & gcloud storage buckets list --project $project --format=json 2>&1
+            # Added --quiet to ensure non-interactive bucket listing
+            $raw = & gcloud --quiet storage buckets list --project $project --format=json 2>&1
             if ($LASTEXITCODE -ne 0) {
                 $txt = ($raw | Out-String)
                 if ($txt -match '(?i)permission|denied|forbidden|403') { $perm=$true }
