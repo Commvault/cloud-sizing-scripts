@@ -35,7 +35,6 @@ class InstanceInfo:
 class InstanceSummary:
     def __init__(self):
         self.region = None
-        self.compartment_id = None
         self.instance_count = 0
         self.total_sizeGB = 0
         self.total_sizeTB = 0
@@ -57,7 +56,6 @@ class ObjectStorageSummary:
     def __init__(self):
         self.region = None
         self.namespace = None
-        self.compartment_id = None
         self.bucket_count = 0
         self.total_storage_GB = 0
         self.total_storage_TB = 0
@@ -72,23 +70,23 @@ def install_and_import(package):
 
 def get_sheet_info(workload):
     if workload == "instances":
-        info_sheet = "InstanceInfo"
-        summary_sheet = "InstanceSummary"
+        info_sheet = "Instance Info"
+        summary_sheet = "Instance Summary"
         info_headers = [
             "Compartment ID", "Instance ID", "Instance Name", "Region",
             "Availability Domain", "Shape", "State", "Number of Volumes",
             "Size (GB)", "Size (TB)", "Defined Tags", "Freeform Tags"
         ]
-        summary_headers = ["Region", "Compartment ID", "Instance Count", "Total Size (GB)", "Total Size (TB)"]
+        summary_headers = ["Region", "Instance Count", "Total Size (GB)", "Total Size (TB)"]
     elif workload == "object_storage":
-        info_sheet = "ObjectStorageInfo"
-        summary_sheet = "ObjectStorageSummary"
+        info_sheet = "Object Storage Info"
+        summary_sheet = "Object Storage Summary"
         info_headers = [
             "Namespace", "Compartment ID", "Bucket Name", "Region",
             "Storage Tier", "Object Count", "Size (GB)", "Size (TB)",
             "Defined Tags", "Freeform Tags"
         ]
-        summary_headers = ["Namespace", "Region", "Compartment ID", "Bucket Count", "Total Size (GB)", "Total Size (TB)"]
+        summary_headers = ["Region", "Bucket Count", "Total Size (GB)", "Total Size (TB)"]
     else:
         raise ValueError(f"Unsupported workload: {workload}")
 
@@ -126,8 +124,8 @@ def init_excel(filename, workload):
         
         info_sheet, summary_sheet, info_headers, summary_headers = get_sheet_info(workload)
 
-        wb.create_sheet(info_sheet)
         wb.create_sheet(summary_sheet)
+        wb.create_sheet(info_sheet)
 
         wb[info_sheet].append(info_headers)
         wb[summary_sheet].append(summary_headers)
@@ -178,47 +176,46 @@ def dump_summary(filename, workload, summary):
     wb = load_workbook(filename)
     sheet = wb[summary_sheet]
 
-    if workload == "instances":
-        row = [
-            summary.region,
-            summary.compartment_id,
-            summary.instance_count,
-            summary.total_sizeGB,
-            summary.total_sizeTB,
-        ]
-    elif workload == "object_storage":
-        row = [
-            summary.namespace,
-            summary.region,
-            summary.compartment_id,
-            summary.bucket_count,
-            summary.total_storage_GB,
-            summary.total_storage_TB,
-        ]
-    else:
-        raise ValueError(f"Unsupported workload: {workload}")
+    for obj in summary:
+        if workload == "instances":
+            row = [
+                obj.region,
+                obj.instance_count,
+                obj.total_sizeGB,
+                obj.total_sizeTB,
+            ]
+        elif workload == "object_storage":
+            row = [
+                obj.region,
+                obj.bucket_count,
+                obj.total_storage_GB,
+                obj.total_storage_TB,
+            ]
+        else:
+            raise ValueError(f"Unsupported workload: {workload}")
+        sheet.append(row)
 
-    sheet.append(row)
     wb.save(filename)
 
 def write_grand_total(filename, workload):
     wb = load_workbook(filename)
 
+    bold_font = Font(bold=True)
     if workload == "instances":
         global total_instances, total_instance_sizeGB, total_instance_sizeTB
         sheet_name = "InstanceSummary"
-        row = ["Grand Total", "", total_instances, total_instance_sizeGB, total_instance_sizeTB]
+        row = ["Total Instances", total_instances, total_instance_sizeGB, total_instance_sizeTB]
     elif workload == "object_storage":
         sheet_name = "ObjectStorageSummary"
-        # You'd update these totals accordingly if you track them
-        # For example, let's assume:
         global total_namespaces, total_buckets, total_storageGB, total_storageTB
-        row = ["Grand Total", "", total_buckets, total_storageGB, total_storageTB]
+        row = ["Total Buckets", total_buckets, total_storageGB, total_storageTB]
     else:
         raise ValueError(f"Unsupported workload: {workload}")
 
     sheet = wb[sheet_name]
     sheet.append(row)
+    for cell in sheet[2]:
+        cell.font = bold_font
     wb.save(filename)
 
 def get_object_storage_info(config, filename, regions=[], compartments=[]):
@@ -234,19 +231,17 @@ def get_object_storage_info(config, filename, regions=[], compartments=[]):
         logging.info(f"Processing region: {region}")
         config["region"] = region
         object_storage_client = oci.object_storage.ObjectStorageClient(config)
+        region_summary = ObjectStorageSummary()
+        region_summary.region = region
+        region_summary.bucket_count = 0
+        region_summary.total_storage_GB = 0
+        region_summary.total_storage_TB = 0
         try:
             namespace = object_storage_client.get_namespace().data
         except Exception as e:
             logging.error(f"Error fetching namespace for region {region}: {e}")
             continue
         for compartment in compartments:
-            compartment_summary = ObjectStorageSummary()
-            compartment_summary.region = region
-            compartment_summary.namespace = namespace
-            compartment_summary.compartment_id = compartment
-            compartment_summary.bucket_count = 0
-            compartment_summary.total_storage_GB = 0
-            compartment_summary.total_storage_TB = 0
             compartment_bucket_list = []
             try:
                 buckets = oci.pagination.list_call_get_all_results(
@@ -282,17 +277,18 @@ def get_object_storage_info(config, filename, regions=[], compartments=[]):
                 except Exception as e:
                     logging.error(f"Error fetching stats for bucket {bucket.name}: {e}")
                     continue
-                compartment_summary.bucket_count += 1
-                compartment_summary.total_storage_GB += bucket_info.sizeGB if bucket_info.sizeGB else 0
-                compartment_summary.total_storage_TB += bucket_info.sizeTB if bucket_info.sizeTB else 0
+                region_summary.bucket_count += 1
+                region_summary.total_storage_GB += bucket_info.sizeGB if bucket_info.sizeGB else 0
+                region_summary.total_storage_TB += bucket_info.sizeTB if bucket_info.sizeTB else 0
                 compartment_bucket_list.append(bucket_info)
                 total_buckets += 1
                 total_storageGB += bucket_info.sizeGB if bucket_info.sizeGB else 0
                 total_storageTB += bucket_info.sizeTB if bucket_info.sizeTB else 0
-            object_storage_summary_list.append(compartment_summary)
             dump_info(filename, "object_storage", compartment_bucket_list)
-            dump_summary(filename, "object_storage", compartment_summary)
+        object_storage_summary_list.append(region_summary)
+        
     write_grand_total(filename, "object_storage")
+    dump_summary(filename, "object_storage", object_storage_summary_list)
     format_workbook(filename)
     logging.info("Completed processing all regions and compartments for object storage.")
     logging.info(f"Grand Total - Buckets: {total_buckets}, Size (GB): {total_storageGB}, Size (TB): {total_storageTB}")
@@ -358,12 +354,11 @@ def get_instance_info(config, filename, regions=[], compartments=[]):
         logging.info(f"Processing region: {region}")
         config["region"] = region
         compute_client = oci.core.ComputeClient(config)
+        region_summary = InstanceSummary()
         for compartment in compartments:
-            compartment_summary = InstanceSummary()
             logging.info(f"Processing compartment: {compartment}")
             compartment_instance_list = []
-            compartment_summary.compartment_id = compartment
-            compartment_summary.region = region
+            region_summary.region = region
             instances = oci.pagination.list_call_get_all_results(compute_client.list_instances,
                                                                 compartment_id=compartment,
                                                                 retry_strategy=oci.retry.DEFAULT_RETRY_STRATEGY).data
@@ -393,17 +388,17 @@ def get_instance_info(config, filename, regions=[], compartments=[]):
                 instance_info.number_of_volumes = (1 if boot_volume_size > 0 else 0) + block_volume_count
                 instance_info.sizeGB = boot_volume_size + block_volume_size 
                 instance_info.sizeTB = round(instance_info.sizeGB / 1024, 2)
-                compartment_summary.instance_count += 1
-                compartment_summary.total_sizeGB += instance_info.sizeGB
-                compartment_summary.total_sizeTB += instance_info.sizeTB
+                region_summary.instance_count += 1
+                region_summary.total_sizeGB += instance_info.sizeGB
+                region_summary.total_sizeTB += instance_info.sizeTB
                 compartment_instance_list.append(instance_info)
                 total_instances += 1
                 total_instance_sizeGB += instance_info.sizeGB
                 total_instance_sizeTB += instance_info.sizeTB
-            instance_summary_list.append(compartment_summary)
             dump_info(filename, "instances", compartment_instance_list)
-            dump_summary(filename, "instances", compartment_summary)
+        instance_summary_list.append(region_summary)
     write_grand_total(filename, "instances")
+    dump_summary(filename, "instances", instance_summary_list)
     format_workbook(filename)
     logging.info("Completed processing all regions and compartments.")
     logging.info(f"Grand Total - Instances: {total_instances}, Size (GB): {total_instance_sizeGB}, Size (TB): {total_instance_sizeTB}")
