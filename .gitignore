@@ -1,0 +1,13 @@
+# Python-generated files
+OCI/__pycache__/
+OCI/*.py[oc]
+OCI/build/
+OCI/dist/
+OCI/wheels/
+OCI/*.egg-info
+
+# Virtual environments
+OCI/.venv
+
+OCI/Logs
+OCI/Metrics
