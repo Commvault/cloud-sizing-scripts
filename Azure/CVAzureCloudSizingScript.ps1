@@ -2,8 +2,8 @@
 .SYNOPSIS  
     Azure Cloud Sizing Script - Comprehensive inventory and sizing analysis
 .DESCRIPTION  
-    Inventories Azure Virtual Machines, Storage Accounts, File Shares, and NetApp Files volumes across all or specified subscriptions.
-    Calculates disk sizes for VMs, storage capacity utilization for Storage Accounts, capacity metrics for File Shares, and usage metrics for NetApp Files.
+    Inventories Azure Virtual Machines, Storage Accounts, File Shares, and NetApp File Volumes across all or specified subscriptions.
+    Calculates disk sizes for VMs, storage capacity utilization for Storage Accounts, capacity metrics for File Shares, and usage metrics for NetApp File Volumes.
     Generates detailed CSV reports with comprehensive sizing information in multiple units (GB, TB, TiB).
     Includes hierarchical progress tracking and comprehensive logging.
     Outputs timestamped CSV files and creates a ZIP archive of all results.
@@ -51,10 +51,10 @@
 
 .EXAMPLE  
     .\CVAzureCloudSizingScript.ps1 -Types NetApp
-    # Only inventories NetApp Files volumes in all subscriptions
+    # Only inventories NetApp File volumes in all subscriptions
 .EXAMPLE  
     .\CVAzureCloudSizingScript.ps1 -Types VM,Storage,NetApp -Subscriptions Production  
-    # Inventories VMs, Storage Accounts, and NetApp Files in only the Production subscription
+    # Inventories VMs, Storage Accounts, and NetApp File Volumes in only the Production subscription
 
 .EXAMPLE  
     .\CVAzureCloudSizingScript.ps1 -Subscriptions xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
