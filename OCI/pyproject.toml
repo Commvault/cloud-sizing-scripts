@@ -1,0 +1,11 @@
+[project]
+name = "resource-manager"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "oci>=2.159.1",
+    "openpyxl>=3.1.5",
+    "pandas>=2.3.2",
+]
