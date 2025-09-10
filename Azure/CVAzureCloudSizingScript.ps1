@@ -421,6 +421,15 @@ foreach ($sub in $subs) {
                                     $fileShareObj.Add("StorageAccountType", $sa.Kind)
                                     $fileShareObj.Add("StorageAccountSkuName", $sa.Sku.Name)
                                     $fileShareObj.Add("StorageAccountAccessTier", $sa.AccessTier)
+                                    # Determine file share-specific tier if available. If not present, set to 'Unknown' (do NOT fall back to storage account tier).
+                                    $shareTier = $null
+                                    if ($fileShareInfo -and $fileShareInfo.PSObject.Properties.Name -contains 'AccessTier') {
+                                        $shareTier = $fileShareInfo.AccessTier
+                                    } elseif ($fileShareInfo -and $fileShareInfo.Properties -and $fileShareInfo.Properties.AccessTier) {
+                                        $shareTier = $fileShareInfo.Properties.AccessTier
+                                    }
+                                    if (-not $shareTier) { $shareTier = 'Unknown' }
+                                    $fileShareObj.Add("ShareTier", $shareTier)
                                     $fileShareObj.Add("Subscription", $sub.Name)
                                     $fileShareObj.Add("Region", $sa.PrimaryLocation)
                                     $fileShareObj.Add("ResourceGroup", $sa.ResourceGroupName)
