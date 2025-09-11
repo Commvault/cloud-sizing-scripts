@@ -16,6 +16,9 @@ total_namespaces = 0
 total_buckets = 0
 total_storageGB = 0
 total_storageTB = 0
+total_db_systems = 0
+total_db_system_sizeGB = 0
+total_db_system_sizeTB = 0
 
 class InstanceInfo:
     def __init__(self):
@@ -31,6 +34,8 @@ class InstanceInfo:
         self.sizeTB = 0
         self.defined_tags = {}
         self.freeform_tags = {}
+        self.boot_volume_name = None
+        self.block_volume_names = []
 
 class InstanceSummary:
     def __init__(self):
@@ -60,6 +65,30 @@ class ObjectStorageSummary:
         self.total_storage_GB = 0
         self.total_storage_TB = 0
 
+class DBSystemInfo:
+    def __init__(self):
+        self.compartment_id = None
+        self.db_system_id = None
+        self.display_name = None
+        self.region = None
+        self.availability_domain = None
+        self.shape = None
+        self.lifecycle_state = None
+        self.node_count = 0
+        self.db_version = None
+        self.database_edition = None
+        self.data_storage_size_gb = 0
+        self.data_storage_size_tb = 0
+        self.defined_tags = {}
+        self.freeform_tags = {}
+
+class DBSystemSummary:
+    def __init__(self):
+        self.region = None
+        self.db_system_count = 0
+        self.total_storage_gb = 0
+        self.total_storage_tb = 0
+
 def install_and_import(package):
     try:
         __import__(package)
@@ -75,7 +104,7 @@ def get_sheet_info(workload):
         info_headers = [
             "Compartment ID", "Instance ID", "Instance Name", "Region",
             "Availability Domain", "Shape", "State", "Number of Volumes",
-            "Size (GB)", "Size (TB)", "Defined Tags", "Freeform Tags"
+            "Size (GB)", "Size (TB)", "Boot Volume Name", "Block Volume Names", "Defined Tags", "Freeform Tags"
         ]
         summary_headers = ["Region", "Instance Count", "Total Size (GB)", "Total Size (TB)"]
     elif workload == "object_storage":
@@ -87,6 +116,16 @@ def get_sheet_info(workload):
             "Defined Tags", "Freeform Tags"
         ]
         summary_headers = ["Region", "Bucket Count", "Total Size (GB)", "Total Size (TB)"]
+    elif workload == "db_systems":
+        info_sheet = "DB System Info"
+        summary_sheet = "DB System Summary"
+        info_headers = [
+            "Compartment ID", "DB System ID", "Display Name", "Region",
+            "Availability Domain", "Shape", "Lifecycle State", "Node Count",
+            "DB Version", "Database Edition", "Data Storage Size (GB)", "Data Storage Size (TB)",
+            "Defined Tags", "Freeform Tags"
+        ]
+        summary_headers = ["Region", "DB System Count", "Total Storage (GB)", "Total Storage (TB)"]
     else:
         raise ValueError(f"Unsupported workload: {workload}")
 
@@ -150,6 +189,8 @@ def dump_info(filename, workload, object_list: list):
                 obj.number_of_volumes,
                 obj.sizeGB,
                 obj.sizeTB,
+                obj.boot_volume_name if obj.boot_volume_name else "",
+                ", ".join(obj.block_volume_names) if obj.block_volume_names else "",
                 str(obj.defined_tags),
                 str(obj.freeform_tags),
             ]
@@ -163,6 +204,23 @@ def dump_info(filename, workload, object_list: list):
                 obj.object_count,
                 obj.sizeGB,
                 obj.sizeTB,
+                str(obj.defined_tags),
+                str(obj.freeform_tags),
+            ]
+        elif workload == "db_systems":
+            row = [
+                obj.compartment_id,
+                obj.db_system_id,
+                obj.display_name,
+                obj.region,
+                obj.availability_domain,
+                obj.shape,
+                obj.lifecycle_state,
+                obj.node_count,
+                obj.db_version,
+                obj.database_edition,
+                obj.data_storage_size_gb,
+                obj.data_storage_size_tb,
                 str(obj.defined_tags),
                 str(obj.freeform_tags),
             ]
@@ -191,6 +249,13 @@ def dump_summary(filename, workload, summary):
                 obj.total_storage_GB,
                 obj.total_storage_TB,
             ]
+        elif workload == "db_systems":
+            row = [
+                obj.region,
+                obj.db_system_count,
+                obj.total_storage_gb,
+                obj.total_storage_tb,
+            ]
         else:
             raise ValueError(f"Unsupported workload: {workload}")
         sheet.append(row)
@@ -203,12 +268,16 @@ def write_grand_total(filename, workload):
     bold_font = Font(bold=True)
     if workload == "instances":
         global total_instances, total_instance_sizeGB, total_instance_sizeTB
-        sheet_name = "InstanceSummary"
+        sheet_name = "Instance Summary"
         row = ["Total Instances", total_instances, total_instance_sizeGB, total_instance_sizeTB]
     elif workload == "object_storage":
-        sheet_name = "ObjectStorageSummary"
+        sheet_name = "Object Storage Summary"
         global total_namespaces, total_buckets, total_storageGB, total_storageTB
         row = ["Total Buckets", total_buckets, total_storageGB, total_storageTB]
+    elif workload == "db_systems":
+        sheet_name = "DB System Summary"
+        global total_db_systems, total_db_system_sizeGB, total_db_system_sizeTB
+        row = ["Total DB Systems", total_db_systems, total_db_system_sizeGB, total_db_system_sizeTB]
     else:
         raise ValueError(f"Unsupported workload: {workload}")
 
@@ -293,7 +362,7 @@ def get_object_storage_info(config, filename, regions=[], compartments=[]):
     logging.info("Completed processing all regions and compartments for object storage.")
     logging.info(f"Grand Total - Buckets: {total_buckets}, Size (GB): {total_storageGB}, Size (TB): {total_storageTB}")
 
-def get_boot_volume_size(config, instance_id, availability_domain, compartment_id):
+def get_boot_volume_info(config, instance_id, availability_domain, compartment_id):
     compute_client = oci.core.ComputeClient(config)
     block_storage_client = oci.core.BlockstorageClient(config)
     try:
@@ -303,20 +372,22 @@ def get_boot_volume_size(config, instance_id, availability_domain, compartment_i
                                                             compartment_id=compartment_id,
                                                             retry_strategy=oci.retry.DEFAULT_RETRY_STRATEGY)
         boot_volumes = response.data
+        result = {"name": None, "sizeGB": 0}
         if not boot_volumes:
-            return 0
+            return result
         try:
             response = block_storage_client.get_boot_volume(boot_volumes[0].boot_volume_id)
             boot_volume_info = response.data
-            return boot_volume_info.size_in_gbs
+            result = {"name": boot_volume_info.display_name, "sizeGB": boot_volume_info.size_in_gbs}
+            return result
         except Exception as e:
             print(f"Error retrieving boot volume info for instance {instance_id}: {e}")
-            return 0
+            return result
     except Exception as e:
         print(f"Error retrieving boot volume attachments for instance {instance_id}: {e}")
-        return 0
+        return {"name": None, "sizeGB": 0}
 
-def get_block_volume_count_and_size(config, instance_id, availability_domain, compartment_id):
+def get_block_volume_info(config, instance_id, availability_domain, compartment_id):
     compute_client = oci.core.ComputeClient(config)
     block_storage_client = oci.core.BlockstorageClient(config)
     try:
@@ -326,20 +397,20 @@ def get_block_volume_count_and_size(config, instance_id, availability_domain, co
                                                             compartment_id=compartment_id,
                                                             retry_strategy=oci.retry.DEFAULT_RETRY_STRATEGY)
         volume_attachments = response.data
+        result = []
         if not volume_attachments:
-            return 0, 0
-        total_size = 0
+            return result
         for attachment in volume_attachments:
             try:
                 response = block_storage_client.get_volume(attachment.volume_id)
                 volume_info = response.data
-                total_size += volume_info.size_in_gbs
+                result.append({"name": volume_info.display_name, "sizeGB": volume_info.size_in_gbs})
             except Exception as e:
                 print(f"Error retrieving volume info for volume {attachment.volume_id}: {e}")
-        return len(volume_attachments), total_size
+        return result
     except Exception as e:
         print(f"Error retrieving volume attachments for instance {instance_id}: {e}")
-        return 0, 0
+        return []
 
 def get_instance_info(config, filename, regions=[], compartments=[]):
     global total_instances, total_instance_sizeGB, total_instance_sizeTB
@@ -380,14 +451,16 @@ def get_instance_info(config, filename, regions=[], compartments=[]):
                 instance_info.defined_tags = instance.defined_tags
                 instance_info.freeform_tags = instance.freeform_tags
                 try:
-                    boot_volume_size = get_boot_volume_size(config, instance.id, instance.availability_domain, instance.compartment_id)
-                    block_volume_count, block_volume_size = get_block_volume_count_and_size(config, instance.id, instance.availability_domain, instance.compartment_id)
+                    boot_volume_info = get_boot_volume_info(config, instance.id, instance.availability_domain, instance.compartment_id)
+                    block_volumes_info = get_block_volume_info(config, instance.id, instance.availability_domain, instance.compartment_id)
                 except Exception as e:
                     logging.error(f"Error fetching volume data for instance {instance.id}: {e}")
-                    continue 
-                instance_info.number_of_volumes = (1 if boot_volume_size > 0 else 0) + block_volume_count
-                instance_info.sizeGB = boot_volume_size + block_volume_size 
+                    continue
+                instance_info.number_of_volumes = (1 if boot_volume_info["sizeGB"] > 0 else 0) + len(block_volumes_info)
+                instance_info.sizeGB = boot_volume_info["sizeGB"] + sum([bv["sizeGB"] for bv in block_volumes_info])
                 instance_info.sizeTB = round(instance_info.sizeGB / 1024, 2)
+                instance_info.boot_volume_name = boot_volume_info["name"] if boot_volume_info["name"] else None
+                instance_info.block_volume_names = [bv["name"] for bv in block_volumes_info]
                 region_summary.instance_count += 1
                 region_summary.total_sizeGB += instance_info.sizeGB
                 region_summary.total_sizeTB += instance_info.sizeTB
@@ -402,6 +475,67 @@ def get_instance_info(config, filename, regions=[], compartments=[]):
     format_workbook(filename)
     logging.info("Completed processing all regions and compartments.")
     logging.info(f"Grand Total - Instances: {total_instances}, Size (GB): {total_instance_sizeGB}, Size (TB): {total_instance_sizeTB}")
+
+def get_database_info(config, filename, regions=[], compartments=[]):
+    global total_db_systems, total_db_system_sizeGB, total_db_system_sizeTB
+    db_summary_list = []
+    identity_client = oci.identity.IdentityClient(config)
+    if not regions:
+        regions = [region.region_name for region in identity_client.list_region_subscriptions(config["tenancy"]).data]
+    if not compartments:
+        compartments = [compartment.id for compartment in identity_client.list_compartments(compartment_id=config["tenancy"], compartment_id_in_subtree=True).data]
+    for region in regions:
+        logging.info(f"Processing region: {region}")
+        config["region"] = region
+        db_client = oci.database.DatabaseClient(config)
+        region_summary = DBSystemSummary()
+        region_summary.region = region
+        for compartment in compartments:
+            logging.info(f"Processing compartment: {compartment}")
+            compartment_db_list = []
+            try:
+                db_systems = oci.pagination.list_call_get_all_results(
+                    db_client.list_db_systems,
+                    compartment_id=compartment
+                ).data
+            except Exception as e:
+                logging.error(f"Error fetching DB systems for compartment {compartment}: {e}")
+                continue
+            logging.info(f"Found {len(db_systems)} DB system(s)")
+            if len(db_systems) == 0:
+                continue
+            for db in db_systems:
+                if db.lifecycle_state == "TERMINATED":
+                    continue
+                db_info = DBSystemInfo()
+                db_info.compartment_id = compartment
+                db_info.db_system_id = db.id
+                db_info.display_name = db.display_name
+                db_info.region = region
+                db_info.availability_domain = db.availability_domain
+                db_info.shape = db.shape
+                db_info.lifecycle_state = db.lifecycle_state
+                db_info.node_count = db.node_count if hasattr(db, "node_count") else 0
+                db_info.db_version = db.version if hasattr(db, "version") else ""
+                db_info.database_edition = db.database_edition if hasattr(db, "database_edition") else "" 
+                db_info.data_storage_size_gb = db.data_storage_size_in_gbs if hasattr(db, "data_storage_size_in_gbs") else 0
+                db_info.data_storage_size_tb = round(db_info.data_storage_size_gb / 1024, 2)
+                db_info.defined_tags = db.defined_tags
+                db_info.freeform_tags = db.freeform_tags
+                region_summary.db_system_count += 1
+                region_summary.total_storage_gb += db_info.data_storage_size_gb
+                region_summary.total_storage_tb += db_info.data_storage_size_tb
+                compartment_db_list.append(db_info)
+                total_db_systems += 1
+                total_db_system_sizeGB += db_info.data_storage_size_gb
+                total_db_system_sizeTB += db_info.data_storage_size_tb
+            dump_info(filename, "db_systems", compartment_db_list)
+        db_summary_list.append(region_summary)
+    write_grand_total(filename, "db_systems")
+    dump_summary(filename, "db_systems", db_summary_list)
+    format_workbook(filename)
+    logging.info("Completed processing all regions and compartments for DB systems.")
+    logging.info(f"Grand Total - DB Systems: {total_db_systems}, Storage (GB): {total_db_system_sizeGB}, Storage (TB): {total_db_system_sizeTB}")
 
 if __name__ == "__main__":
 
@@ -459,6 +593,9 @@ if __name__ == "__main__":
     elif workload == "object_storage":
         init_excel(filename,workload)
         get_object_storage_info(config, filename, regions, compartments)
+    elif workload == "db_systems":
+        init_excel(filename,workload)
+        get_database_info(config, filename, regions, compartments)
     else:
         print(f"Workload '{workload}' is not supported yet. Supported workloads: instances, object_storage")
         sys.exit(1)
