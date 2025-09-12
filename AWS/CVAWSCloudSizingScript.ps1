@@ -1,3 +1,200 @@
+#requires -Version 7.0
+#requires -Modules ImportExcel, AWS.Tools.Common, AWS.Tools.EC2, AWS.Tools.S3, AWS.Tools.SecurityToken, AWS.Tools.IdentityManagement, AWS.Tools.CloudWatch, AWS.Tools.RDS, AWS.Tools.FSx, AWS.Tools.ElasticFileSystem, AWS.Tools.DynamoDBv2, AWS.Tools.Redshift
+
+<#
+.SYNOPSIS
+    AWS Cloud Sizing Script – Comprehensive inventory and sizing analysis for compute, storage, and databases.
+
+.DESCRIPTION
+    Inventories AWS workloads across one or multiple accounts and regions:
+      - EC2 instances (with attached/unattached EBS volumes)
+      - S3 buckets and storage metrics
+      - Elastic File System (EFS)
+      - FSx file systems (ONTAP/SVX, Windows, Lustre, etc.)
+      - RDS database instances
+      - DynamoDB tables
+      - Redshift clusters
+    Supports multiple authentication methods including:
+      - Access/Secret Key authentication (via Creds.txt or ProfileLocation)
+      - Default AWS CLI profile (IAM role assumed automatically in CloudShell/EC2)
+      - Cross-account role assumption
+    Generates detailed Excel reports with both workload summaries and details,
+    at the account level and across all accounts.
+    Includes hierarchical progress tracking and detailed logging.
+    Outputs timestamped Excel files and creates a ZIP archive of all results.
+
+.PARAMETER DefaultProfile
+    Use the default AWS CLI profile (IAM role) for authentication.  
+    Typically used when running inside AWS CloudShell or an EC2 instance.
+
+.PARAMETER UserSpecifiedProfileNames
+    Comma-separated list of AWS CLI profile names defined inside a credentials file (Creds.txt).
+
+.PARAMETER AllLocalProfiles
+    Use all profiles defined inside a credentials file.
+
+.PARAMETER ProfileLocation
+    Path to a shared credentials file (e.g., ./Creds.txt).  
+    Required for access/secret key authentication outside AWS (e.g., Laptop/Desktop).
+
+.PARAMETER CrossAccountRoleName
+    Name of the IAM role to assume for cross-account access.  
+    Must be executed from AWS environments (EC2/CloudShell) or with valid base IAM role.
+
+.PARAMETER UserSpecifiedAccounts
+    Comma-separated list of AWS account IDs to use with the specified cross-account role.
+
+.PARAMETER UserSpecifiedAccountsFile
+    Path to a file containing AWS account IDs (one per line) to use with the specified cross-account role.
+
+.PARAMETER Regions
+    Comma-separated list of AWS regions to query.
+
+.PARAMETER ExternalId
+    External ID required for cross-account role assumption (Optional).
+
+.EXAMPLES
+    # Run from Laptop with access/secret key creds file
+    .\CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "Profile1,Profile2" -ProfileLocation './Creds.txt' -Regions "us-west-1"
+
+    # Run from CloudShell with IAM role (default profile)
+    ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-west-1"
+
+    # Run from CloudShell using uploaded creds file
+    ./CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "Profile1" -ProfileLocation './Creds.txt' -Regions "us-east-1"
+
+    # Run cross-account role from AWS environment (CloudShell/EC2)
+    .\CVAWSCloudSizingScript.ps1 -CrossAccountRoleName "InventoryRole" -UserSpecifiedAccountsFile "./Accounts.txt" -Regions "us-east-1,us-west-2"
+
+.OUTPUTS
+    Creates a timestamped output directory with the following files:
+
+    - <AccountID>_summary_YYYY-MM-DD_HHMMSS.xlsx
+        – Account-level report containing:
+            • Workload-specific summaries (EC2, S3, RDS, EFS, FSx, DynamoDB, Redshift)
+            • Workload-specific detailed sheets for each service
+
+    - comprehensive_all_aws_accounts_summary_YYYY-MM-DD_HHMMSS.xlsx
+        – Consolidated report across all AWS accounts with the same summary + details structure
+
+    - aws_sizing_script_output_YYYY-MM-DD_HHMMSS.log
+        – Complete execution log
+
+    - aws_sizing_results_YYYY-MM-DD_HHMMSS.zip
+        – ZIP archive containing all per-account summary files, the comprehensive report, and the log
+
+.NOTES
+    Requirements:
+    - PowerShell 7
+    - ImportExcel module
+    - AWS.Tools.* modules (for local execution)
+
+    SETUP INSTRUCTIONS FOR AWS CLOUDSHELL:
+    --------------------------------------
+    1. ImportExcel module must be installed (AWS.Tools.* are pre-installed):
+       pwsh
+       Install-Module -Name ImportExcel -Force
+
+    2. Authentication options:
+       • Default IAM role (use -DefaultProfile, no creds needed)
+       • Upload Creds.txt file and run with -UserSpecifiedProfileNames/-ProfileLocation
+
+    3. Run the script from CloudShell after uploading:
+        pwsh
+       ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1"
+    
+        SETUP INSTRUCTIONS FOR LOCAL SYSTEM (Laptop/Desktop):
+    -----------------------------------------------------
+    1. Install PowerShell 7:
+       https://github.com/PowerShell/PowerShell/releases
+
+    2. Install required PowerShell modules:
+       Get-Module AWS.Tools.* | Remove-Module -Force
+       Install-Module -Name ImportExcel -Scope CurrentUser -Force -Confirm:$false
+       Install-Module -Name AWS.Tools.Installer -Scope CurrentUser -Force -Confirm:$false
+       Install-AWSToolsModule -Name AWS.Tools.Common,AWS.Tools.EC2,AWS.Tools.S3,AWS.Tools.SecurityToken,AWS.Tools.IdentityManagement,AWS.Tools.CloudWatch,AWS.Tools.RDS,AWS.Tools.DynamoDBv2,AWS.Tools.Redshift,AWS.Tools.FSx,AWS.Tools.EKS,AWS.Tools.ElasticFileSystem -Scope CurrentUser -CleanUp -Force -Confirm:$false
+
+    3. Authentication:
+       • Preferred: Creds.txt file (AWS access/secret keys) with profiles
+       • Or: Use -ProfileLocation parameter to specify the creds file path
+
+    4. Run the script with selected profiles or accounts.
+
+
+    IAM Permissions:
+    ----------------
+    Use the following JSON policy (example) for cross-account or execution role:
+    {
+       "Version": "2012-10-17",
+       "Statement": [
+           {
+               "Effect": "Allow",
+               "Action": [
+                   "backup:ListBackupPlans",
+                   "backup:ListBackupSelections",
+                   "backup:GetBackupPlan",
+                   "backup:GetBackupSelection",
+                   "ce:GetCostAndUsage",
+                   "cloudwatch:GetMetricStatistics",
+                   "cloudwatch:ListMetrics",
+                   "cloudwatch:DescribeAlarms",
+                   "dynamodb:ListTables",
+                   "dynamodb:DescribeTable",
+                   "dynamodb:ListTagsOfResource",
+                   "ec2:DescribeInstances",
+                   "ec2:DescribeRegions",
+                   "ec2:DescribeVolumes",
+                   "ec2:DescribeSnapshots",
+                   "ec2:DescribeTags",
+                   "eks:DescribeCluster",
+                   "eks:ListClusters",
+                   "eks:ListNodegroups",
+                   "eks:ListTagsForResource",
+                   "elasticfilesystem:DescribeFileSystems",
+                   "elasticfilesystem:ListTagsForResource",
+                   "elasticfilesystem:DescribeTags",
+                   "fsx:DescribeFileSystems",
+                   "fsx:DescribeVolumes",
+                   "fsx:ListTagsForResource",
+                   "iam:ListAccountAliases",
+                   "kms:ListKeys",
+                   "organizations:ListAccounts",
+                   "rds:DescribeDBInstances",
+                   "rds:ListTagsForResource",
+                   "redshift:DescribeClusters",
+                   "redshift:DescribeTags",
+                   "s3:GetBucketLocation",
+                   "s3:ListAllMyBuckets",
+                   "s3:GetBucketTagging",
+                   "s3:ListBucket",
+                   "secretsmanager:ListSecrets",
+                   "sts:AssumeRole",
+                   "sts:GetCallerIdentity",
+                   "sqs:ListQueues"
+               ],
+               "Resource": "*"
+           }
+       ]
+    }
+
+    Credential Files:
+    -----------------
+    - Creds.txt (AWS shared credentials format):
+        [Profile1]
+        aws_access_key_id = <AccessKey1>
+        aws_secret_access_key = <SecretKey1>
+
+        [Profile2]
+        aws_access_key_id = <AccessKey2>
+        aws_secret_access_key = <SecretKey2>
+
+    - Accounts.txt (one AWS account ID per line, no commas):
+        123456789012
+        987654321098
+        555555555555
+#>
+
+
 [CmdletBinding(DefaultParameterSetName = 'DefaultProfile')]
 param (
     [Parameter(ParameterSetName='AllLocalProfiles',Mandatory=$true)]
