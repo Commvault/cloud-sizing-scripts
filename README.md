@@ -5,7 +5,7 @@ This repository contains PowerShell scripts for cloud resource discovery. These 
 # AWS 
 Script: `AWS/CVAWSCloudSizingScript.ps1` Discovers AWS resources and produce sizing/inventory reports to support Commvault protection planning.
 
-**Supported workloads:** `EC2, S3, EFS, FSx, RDS, DynamoDB, Redshift, UnattachedVolumes`
+**Supported workloads:** `EC2, S3, EFS, FSx, RDS, DynamoDB, Redshift`
 
 Execution Instructions
 ----------------------
