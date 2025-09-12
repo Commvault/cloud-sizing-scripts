@@ -3,17 +3,9 @@
 This repository contains PowerShell scripts for cloud resource discovery. These scripts are designed to assist Commvault representatives in gathering information about cloud resources that may need protection, and help representatives in estimating the cost of protecting these resources. For setup instructions and steps to run, refer to the individual script files in each cloud provider folder.
 
 # AWS 
-Script: `AWS/New-CVAWS_Script_S3.ps1` Discovers AWS resources and produce sizing/inventory reports to support Commvault protection planning.
+Script: `AWS/CVAWSCloudSizingScript.ps1` Discovers AWS resources and produce sizing/inventory reports to support Commvault protection planning.
 
-Supported workloads
-- EC2 (instances + attached EBS volumes)
-- S3 (buckets — CloudWatch metrics + enumeration fallback)
-- EFS (file systems)
-- FSx (file systems + ONTAP SVM volumes)
-- RDS (database instances)
-- DynamoDB (tables)
-- Redshift (clusters)
-- UnattachedVolumes (available EBS volumes)
+**Supported workloads:** `EC2, S3, EFS, FSx, RDS, DynamoDB, Redshift, UnattachedVolumes`
 
 Execution Instructions
 ----------------------
@@ -30,22 +22,18 @@ Method 1 — Run in AWS CloudShell
    ```powershell
    Install-Module -Name ImportExcel -Scope CurrentUser -Force
    ```
-4. Upload `New-CVAWS_Script_S3.ps1` to CloudShell and run:
+4. Upload `CVAWSCloudSizingScript.ps1` to CloudShell and run:
    ```powershell
-   ./New-CVAWS_Script_S3.ps1 -DefaultProfile -Regions "us-east-1"
+   ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1"
    ```
 5. (Optional) Make executable:
    ```bash
-   chmod +x New-CVAWS_Script_S3.ps1
+   chmod +x CVAWSCloudSizingScript.ps1
    ```
 
 Method 2 — Run locally 
 1. Install PowerShell 7:
    https://github.com/PowerShell/PowerShell/releases
-2. Change to the script directory:
-   ```powershell
-   cd "c:\Users\gamanullah\Desktop\AWS Cost Sizing\Optimized\AWS"
-   ```
 3. Install required modules (example consolidated command):
    ```powershell
    # remove any loaded AWSTools modules first (optional)
@@ -60,7 +48,7 @@ Method 2 — Run locally
    (Add modules if you require additional AWS services.)
 4. Run the script with desired parameters:
    ```powershell
-   .\New-CVAWS_Script_S3.ps1 -DefaultProfile -Regions "us-west-2"
+   ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-west-2"
    ```
 
 Common script parameters
@@ -75,16 +63,16 @@ Common script parameters
 Example invocations
 ```powershell
 # CloudShell using CloudShell role (default IAM role)
-./New-CVAWS_Script_S3.ps1 -DefaultProfile -Regions "us-east-1"
+./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1"
 
 # CloudShell using uploaded credentials file
-./New-CVAWS_Script_S3.ps1 -UserSpecifiedProfileNames "Profile1" -ProfileLocation "./Creds.txt" -Regions "us-east-1"
+./CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "Profile1" -ProfileLocation "./Creds.txt" -Regions "us-east-1"
 
 # Local, using specific credential file and profiles
-.\New-CVAWS_Script_S3.ps1 -UserSpecifiedProfileNames "prod,dev" -ProfileLocation ".\Creds.txt" -Regions "us-east-1,us-west-2"
+./CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "prod,dev" -ProfileLocation "./Creds.txt" -Regions "us-east-1,us-west-2"
 
-# Cross-account role using file with account IDs
-.\New-CVAWS_Script_S3.ps1 -CrossAccountRoleName "InventoryRole" -UserSpecifiedAccounts "123456789012,098765432112" -Regions "us-east-1"
+# Cross-account role using file with account IDs [CloudShell]
+./CVAWSCloudSizingScript.ps1 -CrossAccountRoleName "InventoryRole" -UserSpecifiedAccounts "123456789012" -Regions "us-east-1"
 ```
 
 Outputs
@@ -94,6 +82,9 @@ Files are written to the working directory with timestamps:
 - `comprehensive_all_aws_accounts_summary_YYYY-MM-DD_HHMMSS.xlsx` — consolidated workbook
 - `aws_sizing_script_output_YYYY-MM-DD_HHMMSS.log` — execution log
 - `aws_sizing_results_YYYY-MM-DD_HHMMSS.zip` — ZIP archive 
+
+**Note:** Ensure the executing user has all necessary AWS permissions. The required IAM permissions are included in the script header.
+
 
 ## Azure
 Script: `Azure/CVAzureCloudSizingScript.ps1`
