@@ -2,9 +2,98 @@
 
 This repository contains PowerShell scripts for cloud resource discovery. These scripts are designed to assist Commvault representatives in gathering information about cloud resources that may need protection, and help representatives in estimating the cost of protecting these resources. For setup instructions and steps to run, refer to the individual script files in each cloud provider folder.
 
-## AWS
-Script: `AWS/CVAWSCloudSizingScript.ps1`
-Discovers AWS cloud resources to assist with Commvault protection planning.
+# AWS 
+Script: `AWS/New-CVAWS_Script_S3.ps1` Discovers AWS resources and produce sizing/inventory reports to support Commvault protection planning.
+
+Supported workloads
+- EC2 (instances + attached EBS volumes)
+- S3 (buckets — CloudWatch metrics + enumeration fallback)
+- EFS (file systems)
+- FSx (file systems + ONTAP SVM volumes)
+- RDS (database instances)
+- DynamoDB (tables)
+- Redshift (clusters)
+- UnattachedVolumes (available EBS volumes)
+
+Execution Instructions
+----------------------
+
+Two ways to run the AWS sizing script — CloudShell, Local PowerShell.
+
+Method 1 — Run in AWS CloudShell 
+1. Sign in to the AWS Console and open CloudShell.
+2. Enter PowerShell:
+   ```powershell
+   pwsh
+   ```
+3. (Install ImportExcel in CloudShell if Excel output is required)
+   ```powershell
+   Install-Module -Name ImportExcel -Scope CurrentUser -Force
+   ```
+4. Upload `New-CVAWS_Script_S3.ps1` to CloudShell and run:
+   ```powershell
+   ./New-CVAWS_Script_S3.ps1 -DefaultProfile -Regions "us-east-1"
+   ```
+5. (Optional) Make executable:
+   ```bash
+   chmod +x New-CVAWS_Script_S3.ps1
+   ```
+
+Method 2 — Run locally 
+1. Install PowerShell 7:
+   https://github.com/PowerShell/PowerShell/releases
+2. Change to the script directory:
+   ```powershell
+   cd "c:\Users\gamanullah\Desktop\AWS Cost Sizing\Optimized\AWS"
+   ```
+3. Install required modules (example consolidated command):
+   ```powershell
+   # remove any loaded AWSTools modules first (optional)
+   Get-Module AWS.Tools.* | Remove-Module -Force
+
+   # install ImportExcel and AWSTools installer then required AWSTools modules
+   Install-Module -Name ImportExcel -Scope CurrentUser -Force -Confirm:$false
+   Install-Module -Name AWS.Tools.Installer -Scope CurrentUser -Force -Confirm:$false
+
+   Install-AWSToolsModule -Name AWS.Tools.Common,AWS.Tools.EC2,AWS.Tools.S3,AWS.Tools.SecurityToken,AWS.Tools.IdentityManagement,AWS.Tools.CloudWatch,AWS.Tools.RDS,AWS.Tools.DynamoDBv2,AWS.Tools.Redshift,AWS.Tools.FSx,AWS.Tools.ElasticFileSystem -Scope CurrentUser -CleanUp -Force -Confirm:$false
+   ```
+   (Add modules if you require additional AWS services.)
+4. Run the script with desired parameters:
+   ```powershell
+   .\New-CVAWS_Script_S3.ps1 -DefaultProfile -Regions "us-west-2"
+   ```
+
+Common script parameters
+- -DefaultProfile — use default AWS CLI profile / CloudShell role.
+- -UserSpecifiedProfileNames "Profile1,Profile2" — comma-separated local profiles.
+- -AllLocalProfiles — process all local profiles.
+- -ProfileLocation "<path>" — shared credentials file path.
+- -CrossAccountRoleName "<RoleName>" — role to assume in target accounts.
+- -UserSpecifiedAccounts "123456789012,098765432112" — comma-separated account IDs.
+- -Regions "us-east-1,us-west-2" — comma-separated regions to query.
+
+Example invocations
+```powershell
+# CloudShell using CloudShell role (default IAM role)
+./New-CVAWS_Script_S3.ps1 -DefaultProfile -Regions "us-east-1"
+
+# CloudShell using uploaded credentials file
+./New-CVAWS_Script_S3.ps1 -UserSpecifiedProfileNames "Profile1" -ProfileLocation "./Creds.txt" -Regions "us-east-1"
+
+# Local, using specific credential file and profiles
+.\New-CVAWS_Script_S3.ps1 -UserSpecifiedProfileNames "prod,dev" -ProfileLocation ".\Creds.txt" -Regions "us-east-1,us-west-2"
+
+# Cross-account role using file with account IDs
+.\New-CVAWS_Script_S3.ps1 -CrossAccountRoleName "InventoryRole" -UserSpecifiedAccounts "123456789012,098765432112" -Regions "us-east-1"
+```
+
+Outputs
+-------
+Files are written to the working directory with timestamps:
+- `<AccountId>_summary_YYYY-MM-DD_HHMMSS.xlsx` — per-account Excel summary & detail sheets
+- `comprehensive_all_aws_accounts_summary_YYYY-MM-DD_HHMMSS.xlsx` — consolidated workbook
+- `aws_sizing_script_output_YYYY-MM-DD_HHMMSS.log` — execution log
+- `aws_sizing_results_YYYY-MM-DD_HHMMSS.zip` — ZIP archive 
 
 ## Azure
 Script: `Azure/CVAzureCloudSizingScript.ps1`
