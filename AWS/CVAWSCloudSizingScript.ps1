@@ -1078,7 +1078,8 @@ function Process-RDSInstance {
                     Credential = $Credential
                     Region     = $Region
                 }
-                $metric = Get-CWMetricStatistic @cwParams -ErrorAction SilentlyContinue
+                $metric = Get-SafeCWMetricStatistic -Namespace 'AWS/RDS' -MetricName 'VolumeBytesUsed' -Dimensions @(@{ Name = 'DBClusterIdentifier'; Value = $clusterId }) -Period 86400 -Statistics 'Maximum' -StartTime $utcStartTime -EndTime $utcEndTime -Credential $Credential -Region $Region
+                
                 if ($metric -and $metric.Datapoints) {
                     $mv = ($metric.Datapoints | Sort-Object Timestamp -Descending | Select-Object -First 1).Maximum
                     if ($mv -and $mv -gt 0) {
