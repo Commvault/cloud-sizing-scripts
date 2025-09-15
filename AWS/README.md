@@ -35,7 +35,7 @@ Method 2 — Run locally
    Install-Module -Name ImportExcel -Scope CurrentUser -Force -Confirm:$false
    Install-Module -Name AWS.Tools.Installer -Scope CurrentUser -Force -Confirm:$false
 
-   Install-AWSToolsModule -Name AWS.Tools.Common,AWS.Tools.EC2,AWS.Tools.S3,AWS.Tools.SecurityToken,AWS.Tools.IdentityManagement,AWS.Tools.CloudWatch,AWS.Tools.RDS,AWS.Tools.DynamoDBv2,AWS.Tools.Redshift,AWS.Tools.FSx,AWS.Tools.ElasticFileSystem -Scope CurrentUser -CleanUp -Force -Confirm:$false
+   Install-AWSToolsModule -Name AWS.Tools.Common,AWS.Tools.EC2,AWS.Tools.S3,AWS.Tools.SecurityToken,AWS.Tools.IdentityManagement,AWS.Tools.CloudWatch,AWS.Tools.RDS,AWS.Tools.DynamoDBv2,AWS.Tools.Redshift,AWS.Tools.FSx,AWS.Tools.ElasticFileSystem,AWS.Tools.EKS -Scope CurrentUser -CleanUp -Force -Confirm:$false
    ```
 4. Run the script with desired parameters:
    ```powershell
@@ -68,7 +68,7 @@ Example invocations
 Outputs
 -------
 Files are written to the working directory with timestamps:
-- `<AccountId>_summary_YYYY-MM-DD_HHMMSS.xlsx` — per-account Excel summary & detail sheets
+- `<AccountId>_summary_YYYY-MM-DD_HHMMSS.xlsx` — per-account Excel summary & detail sheets(EC2, S3, RDS, FSx, EFS, DynamoDB, Redshift, EKS)
 - `comprehensive_all_aws_accounts_summary_YYYY-MM-DD_HHMMSS.xlsx` — consolidated workbook
 - `aws_sizing_script_output_YYYY-MM-DD_HHMMSS.log` — execution log
 - `aws_sizing_results_YYYY-MM-DD_HHMMSS.zip` — ZIP archive 
