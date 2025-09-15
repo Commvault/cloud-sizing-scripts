@@ -1,5 +1,5 @@
 #requires -Version 7.0
-#requires -Modules ImportExcel, AWS.Tools.Common, AWS.Tools.EC2, AWS.Tools.S3, AWS.Tools.SecurityToken, AWS.Tools.IdentityManagement, AWS.Tools.CloudWatch, AWS.Tools.RDS, AWS.Tools.FSx, AWS.Tools.ElasticFileSystem, AWS.Tools.DynamoDBv2, AWS.Tools.Redshift
+#requires -Modules ImportExcel, AWS.Tools.Common, AWS.Tools.EC2, AWS.Tools.S3, AWS.Tools.SecurityToken, AWS.Tools.IdentityManagement, AWS.Tools.CloudWatch, AWS.Tools.RDS, AWS.Tools.FSx, AWS.Tools.ElasticFileSystem, AWS.Tools.DynamoDBv2, AWS.Tools.Redshift, AWS.Tools.EKS
 
 <#
 .SYNOPSIS
@@ -14,6 +14,7 @@
       - RDS database instances
       - DynamoDB tables
       - Redshift clusters
+      - EKS Clusters and PVCs associated with the cluster
     Supports multiple authentication methods including:
       - Access/Secret Key authentication (via Creds.txt or ProfileLocation)
       - Default AWS CLI profile (IAM role assumed automatically in CloudShell/EC2)
@@ -24,7 +25,7 @@
     Outputs timestamped Excel files and creates a ZIP archive of all results.
 
 .PARAMETER DefaultProfile
-    Use the default AWS CLI profile (IAM role) for authentication.  
+    Use the default AWS CLI profile (IAM role) for authentication.
     Typically used when running inside AWS CloudShell or an EC2 instance.
 
 .PARAMETER UserSpecifiedProfileNames
@@ -34,11 +35,11 @@
     Use all profiles defined inside a credentials file.
 
 .PARAMETER ProfileLocation
-    Path to a shared credentials file (e.g., ./Creds.txt).  
+    Path to a shared credentials file (e.g., ./Creds.txt).
     Required for access/secret key authentication outside AWS (e.g., Laptop/Desktop).
 
 .PARAMETER CrossAccountRoleName
-    Name of the IAM role to assume for cross-account access.  
+    Name of the IAM role to assume for cross-account access.
     Must be executed from AWS environments (EC2/CloudShell) or with valid base IAM role.
 
 .PARAMETER UserSpecifiedAccounts
@@ -102,7 +103,7 @@
     3. Run the script from CloudShell after uploading:
         pwsh
        ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1"
-    
+
         SETUP INSTRUCTIONS FOR LOCAL SYSTEM (Laptop/Desktop):
     -----------------------------------------------------
     1. Install PowerShell 7:
@@ -202,10 +203,10 @@ param (
 
     [Parameter(ParameterSetName='CrossAccountRole',Mandatory=$true)]
     [ValidateNotNullOrEmpty()][string]$CrossAccountRoleName,
-    
+
     [Parameter(ParameterSetName='CrossAccountRole')]
     [string]$CrossAccountRoleSessionName = "CVAWS-Cost-Sizing",
-    
+
     [string]$ExternalId,
 
     [Parameter(ParameterSetName='DefaultProfile')][switch]$DefaultProfile,
@@ -238,7 +239,7 @@ $script:startTime = Get-Date
 $script:currentActivity = ""
 $script:moduleImportError = $false
 
-# Service configuration registry 
+# Service configuration registry
 $script:ServiceRegistry = @{
     EC2 = @{
         DisplayName = "Instances"
@@ -254,7 +255,7 @@ $script:ServiceRegistry = @{
         DisplayName = "Buckets"
         GetCommand = "Get-S3Bucket"
         PropertyPath = $null
-        SizeProperty = "Custom" 
+        SizeProperty = "Custom"
         IdProperty = "BucketName"
         StorageType = "Object"
         ProcessorFunction = "Process-S3Bucket"
@@ -284,7 +285,7 @@ $script:ServiceRegistry = @{
     }
     FSX_SVM = @{
         DisplayName = "ONTAP SVMs"
-        GetCommand = "Get-FSXStorageVirtualMachine" 
+        GetCommand = "Get-FSXStorageVirtualMachine"
         PropertyPath = $null
         SizeProperty = "Custom"
         IdProperty = "StorageVirtualMachineId"
@@ -293,6 +294,19 @@ $script:ServiceRegistry = @{
         RequiresTagProcessing = $true
         SpecialHandling = $true
     }
+EKS = @{
+    DisplayName = "Kubernetes"
+    GetCommand = "Get-AllEKSClusters"
+    CandidateGetCommands = @("Get-AllEKSClusters","Get-EKSClusterList")
+    PropertyPath = $null
+    SizeProperty = "Custom"
+    IdProperty = "Name"
+    StorageType = "Block"
+    ProcessorFunction = "Process-EKSCluster"
+    RequiresTagProcessing = $false
+    SpecialHandling = $true
+}
+
     UnattachedVolumes = @{
         DisplayName = "Volumes"
         GetCommand = "Get-EC2Volume"
@@ -309,7 +323,7 @@ $script:ServiceRegistry = @{
         GetCommand = "Get-RDSDBInstance"
         CandidateGetCommands = @("Get-RDSDBInstance","Get-RDSInstance","Get-RDSDBInstances","Get-RDSDBInstanceList")
         PropertyPath = "DBInstances"
-        SizeProperty = "AllocatedStorageGB"   
+        SizeProperty = "AllocatedStorageGB"
         IdProperty = "DBInstanceIdentifier"
         StorageType = "Block"
         ProcessorFunction = "Process-RDSInstance"
@@ -371,6 +385,7 @@ $baseOutputFSxSVM = "aws_fsx_ontap_svms_info"
 $baseOutputRDS = "aws_rds_info"
 $baseOutputDynamoDB = "aws_dynamodb_info"
 $baseOutputRedshift = "aws_redshift_info"
+$baseOutputEKS = "aws_eks_info"
 $archiveFile = "aws_sizing_results_$date_string.zip"
 
 function Show-ScriptProgress {
@@ -379,7 +394,7 @@ function Show-ScriptProgress {
         [string]$Status = "",
         [int]$PercentComplete = 0
     )
-    
+
     if (-not $script:LastProgressUpdate) { $script:LastProgressUpdate = Get-Date }
     $now = Get-Date
     $elapsed = $now - $script:LastProgressUpdate
@@ -422,7 +437,7 @@ function Get-SafeCWMetricStatistic {
         Dimension      = $Dimensions
         StartTime      = $StartTime
         EndTime        = $EndTime
-        UtcStartTime   = $utcStart   
+        UtcStartTime   = $utcStart
         UtcEndTime     = $utcEnd
         Period         = $Period
         Statistic      = $Statistics
@@ -442,21 +457,21 @@ function Write-ScriptOutput {
         [ValidateSet("Info", "Warning", "Error", "Success")]
         [string]$Level = "Info"
     )
-    
+
     $colors = @{
         Info = "White"
-        Warning = "Yellow" 
+        Warning = "Yellow"
         Error = "Red"
         Success = "Green"
     }
-    
+
     $timestamp = (Get-Date).ToString("HH:mm:ss")
     $logTimestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     $consoleMessage = "[$timestamp] $Message"
     $logMessage = "[$logTimestamp] [$Level] $Message"
-    
+
     Write-Host $consoleMessage -ForegroundColor $colors[$Level]
-    
+
     try {
         $logMessage | Out-File -FilePath $script:LogPath -Append -Encoding UTF8
     }
@@ -467,16 +482,16 @@ function Write-ScriptOutput {
 
 function Convert-BytesToSizes {
     param([double]$Bytes)
-    
+
     if ($Bytes -eq 0) {
         return @{
             SizeGiB = 0; SizeTiB = 0; SizeGB = 0; SizeTB = 0
         }
     }
-    
+
     return @{
         SizeGiB = $Bytes / 1GB
-        SizeTiB = $Bytes / 1TB  
+        SizeTiB = $Bytes / 1TB
         SizeGB = $Bytes / 1000000000
         SizeTB = $Bytes / 1000000000000
     }
@@ -484,7 +499,7 @@ function Convert-BytesToSizes {
 
 function Add-TagProperties {
     param([object]$Object, [array]$Tags)
-    
+
     if ($Tags) {
         foreach ($tag in $Tags) {
             $tagName = "Tag_$($tag.Key -replace '[^a-zA-Z0-9_]', '_')"
@@ -495,10 +510,10 @@ function Add-TagProperties {
 
 function Initialize-ServiceCollections {
     param([string]$AccountId)
-    
+
     if (-not $script:ServiceDataByAccount.ContainsKey($AccountId)) {
         $script:ServiceDataByAccount[$AccountId] = @{}
-        
+
         foreach ($serviceName in $script:ServiceRegistry.Keys) {
             $script:ServiceDataByAccount[$AccountId][$serviceName] = [System.Collections.ArrayList]@()
         }
@@ -509,36 +524,36 @@ function Invoke-ServiceInventory {
     param(
         [string]$ServiceName,
         [object]$Credential,
-        [string]$Region, 
+        [string]$Region,
         [object]$AccountInfo,
         [string]$AccountAlias
     )
-    
+
     $serviceConfig = $script:ServiceRegistry[$ServiceName]
     if (-not $serviceConfig) {
         Write-ScriptOutput "Unknown service: $ServiceName" -Level Warning
         return
     }
-    
+
     try {
         Write-ScriptOutput "$ServiceName inventory started for region $Region" -Level Info
-        
+
         if (-not (Get-Command $serviceConfig.GetCommand -ErrorAction SilentlyContinue)) {
             Write-ScriptOutput "Command $($serviceConfig.GetCommand) not available. Install the appropriate AWS Tools module for $ServiceName." -Level Warning
             return
         }
-        
+
         $getParams = @{
             Credential = $Credential
             Region = $Region
             ErrorAction = 'Stop'
         }
-        
+
         if ($ServiceName -eq "S3") { $getParams.BucketRegion = $Region }
         if ($ServiceName -eq "UnattachedVolumes" -and $serviceConfig.Filter) {
             $getParams.Filter = $serviceConfig.Filter
         }
-        
+
         $resolvedCommand = $null
         if ($serviceConfig.CandidateGetCommands) {
             foreach ($cand in $serviceConfig.CandidateGetCommands) {
@@ -556,7 +571,7 @@ function Invoke-ServiceInventory {
 
         Write-ScriptOutput "Using command $resolvedCommand for service $ServiceName" -Level Info
         $serviceItems = & $resolvedCommand @getParams
-        
+
         if ($serviceConfig.PropertyPath -and $serviceItems) {
             $prop = $serviceConfig.PropertyPath
             try {
@@ -574,27 +589,27 @@ function Invoke-ServiceInventory {
         if ($serviceItems -ne $null -and -not ($serviceItems -is [System.Collections.IEnumerable] -and -not ($serviceItems -is [string]))) {
             $serviceItems = @($serviceItems)
         }
-        
+
         if (-not $serviceItems) {
             Write-ScriptOutput "No $ServiceName found in region $Region" -Level Info
             return
         }
-        
+
         $serviceList = $script:ServiceDataByAccount[$AccountInfo.Account][$ServiceName]
         $count = 1
-        
+
         foreach ($item in $serviceItems) {
             $itemId = $item.($serviceConfig.IdProperty)
             Show-ScriptProgress -Activity "$ServiceName $itemId" -Status "$count / $($serviceItems.Count)" -PercentComplete (($count / $serviceItems.Count) * 100)
-            
+
             $processedItem = & $serviceConfig.ProcessorFunction -Item $item -Credential $Credential -Region $Region -AccountInfo $AccountInfo -AccountAlias $AccountAlias
-            
+
             if ($processedItem) {
                 $serviceList.Add($processedItem) | Out-Null
             }
             $count++
         }
-        
+
         Write-ScriptOutput "$ServiceName done" -Level Success
     }
     catch {
@@ -604,10 +619,10 @@ function Invoke-ServiceInventory {
 
 function Process-EC2Instance {
     param($Item, $Credential, $Region, $AccountInfo, $AccountAlias)
-    
+
     $ebsVolumes = @()
     $totalEbsBytes = 0
-    
+
     foreach ($blockDevice in $Item.BlockDeviceMappings) {
         if ($blockDevice.Ebs) {
             try {
@@ -620,7 +635,7 @@ function Process-EC2Instance {
             }
         }
     }
-    
+
     $instanceTags = @()
     try {
         $tagFilter = @{
@@ -629,7 +644,7 @@ function Process-EC2Instance {
         }
         $tagResponse = Get-EC2Tag -Filter $tagFilter -Credential $Credential -Region $Region -ErrorAction Stop
         $instanceTags = $tagResponse
-        
+
         if ($instanceTags -and $instanceTags.Count -gt 0) {
             Write-ScriptOutput "Retrieved $($instanceTags.Count) tags for instance $($Item.InstanceId)" -Level Info
         }
@@ -646,9 +661,9 @@ function Process-EC2Instance {
             Write-ScriptOutput "Failed to get tags for instance $($Item.InstanceId): $($_.Exception.Message)" -Level Warning
         }
     }
-    
+
     $sizes = Convert-BytesToSizes -Bytes $totalEbsBytes
-    
+
         $ec2Obj = [PSCustomObject]@{
             AwsAccountId = "`u{200B}$($AccountInfo.Account)"
         AwsAccountAlias = $AccountAlias
@@ -664,9 +679,9 @@ function Process-EC2Instance {
         SizeTB = $sizes.SizeTB
         VolumeDetails = ($ebsVolumes | ForEach-Object { "$($_.VolumeId):$($_.Size)GB:$($_.VolumeType)" }) -join ";"
     }
-    
+
     Add-TagProperties -Object $ec2Obj -Tags $instanceTags
-    
+
     return $ec2Obj
 }
 
@@ -707,7 +722,7 @@ function Process-S3Bucket {
             }
         }
 
-        
+
         if ($totalBytes -eq 0) {    try {
                 $val = Get-S3BucketSize -BucketName $bucketName -Credential $Credential -Region $actualRegion
                 if ($val -and $val -gt 0) {
@@ -789,9 +804,9 @@ function Process-S3Bucket {
 
 function Process-EFSFileSystem {
     param($Item, $Credential, $Region, $AccountInfo, $AccountAlias)
-    
+
     $efsSizeBytes = Get-EFSFileSystemSize -EFS $Item -Credential $Credential -Region $Region
-    
+
     $efsTags = @()
     try {
         if (Get-Command "Get-EFSResourceTag" -ErrorAction SilentlyContinue) {
@@ -803,9 +818,9 @@ function Process-EFSFileSystem {
     catch {
         Write-ScriptOutput "Failed to get tags for EFS $($Item.FileSystemId)" -Level Warning
     }
-    
+
     $sizes = Convert-BytesToSizes -Bytes $efsSizeBytes
-    
+
         $efsObj = [PSCustomObject]@{
             AwsAccountId = "`u{200B}$($AccountInfo.Account)"
         AwsAccountAlias = $AccountAlias
@@ -819,9 +834,9 @@ function Process-EFSFileSystem {
         SizeGB = $sizes.SizeGB
         SizeTB = $sizes.SizeTB
     }
-    
+
     Add-TagProperties -Object $efsObj -Tags $efsTags
-    
+
     return $efsObj
 }
 
@@ -839,7 +854,7 @@ function Get-EmptyRow {
 
 function Process-FSXFileSystem {
     param($Item, $Credential, $Region, $AccountInfo, $AccountAlias)
-    
+
     $fsxTags = @()
     try {
         if ($Item.ResourceARN -and $Item.ResourceARN.Trim() -ne "") {
@@ -865,10 +880,10 @@ function Process-FSXFileSystem {
             Write-ScriptOutput "Alternative tag retrieval also failed for FSx $($Item.FileSystemId)" -Level Warning
         }
     }
-    
+
     $capacityBytes = $Item.StorageCapacity * 1GB
     $sizes = Convert-BytesToSizes -Bytes $capacityBytes
-    
+
     $fsxObj = [PSCustomObject]@{
         AwsAccountId = "`u{200B}$($AccountInfo.Account)"
         AwsAccountAlias = $AccountAlias
@@ -883,9 +898,9 @@ function Process-FSXFileSystem {
         StorageCapacityGB = $sizes.SizeGB
         StorageCapacityTB = $sizes.SizeTB
     }
-    
+
     Add-TagProperties -Object $fsxObj -Tags $fsxTags
-    
+
     return $fsxObj
 }
 
@@ -988,10 +1003,287 @@ function Process-FSXStorageVirtualMachine {
     }
 }
 
+ function Ensure-Kubectl {
+    if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+        Write-ScriptOutput "kubectl not found. PVC details will not be collected unless kubectl is installed." -Level Warning
+
+        # Optional: auto-download for Windows
+        if ($env:OS -like "*Windows*") {
+            try {
+                $kubectlUrl = "https://dl.k8s.io/release/v1.30.0/bin/windows/amd64/kubectl.exe"
+                $kubectlPath = "C:\kubectl\kubectl.exe"
+                if (-not (Test-Path "C:\kubectl")) { New-Item -ItemType Directory -Path "C:\kubectl" -Force | Out-Null }
+                Invoke-WebRequest -Uri $kubectlUrl -OutFile $kubectlPath -UseBasicParsing
+                $env:Path += ";C:\kubectl"
+                Write-ScriptOutput "kubectl downloaded to $kubectlPath and added to PATH" -Level Info
+            } catch {
+                Write-ScriptOutput "Failed to auto-install kubectl: $_" -Level Warning
+            }
+        }
+    }
+}
+
+
+function Convert-K8sSizeToBytes {
+     param([string]$Size)
+     if (-not $Size) { return 0 }
+     $s = $Size.Trim()
+     if ($s -match '^(?<num>[\d\.]+)(?<unit>Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K|i)?$') {
+         $num = [double]$matches['num']
+         $unit = $matches['unit']
+         switch ($unit) {
+             'Ei' { return $num * [math]::Pow(1024,6) }
+             'Pi' { return $num * [math]::Pow(1024,5) }
+             'Ti' { return $num * [math]::Pow(1024,4) }
+             'Gi' { return $num * [math]::Pow(1024,3) }
+             'Mi' { return $num * [math]::Pow(1024,2) }
+             'Ki' { return $num * 1024 }
+             'E'  { return $num * 1e18 }
+             'P'  { return $num * 1e15 }
+             'T'  { return $num * 1e12 }
+             'G'  { return $num * 1e9 }
+             'M'  { return $num * 1e6 }
+             'K'  { return $num * 1e3 }
+             default { return $num }
+         }
+     } else {
+         # try to parse numeric-only
+         try { return [double]$s } catch { return 0 }
+     }
+ }
+
+function Get-AllEKSClusters {
+    param(
+        $Credential,
+        [string]$Region,
+        $AccountInfo,
+        $AccountAlias
+    )
+
+    try {
+        if (-not (Get-Command Get-EKSClusterList -ErrorAction SilentlyContinue)) {
+            Write-ScriptOutput "EKS: Get-EKSClusterList command not available. Skipping EKS in region $Region." -Level Warning
+            return
+        }
+
+        # Include Credential when listing clusters so cross-account/profile contexts are correct
+        $clusterNames = Get-EKSClusterList -Credential $Credential -Region $Region -ErrorAction Stop
+
+        if (-not $clusterNames -or $clusterNames.Count -eq 0) {
+            Write-ScriptOutput "EKS: No clusters found in region $Region" -Level Info
+            return
+        }
+
+        foreach ($clusterName in $clusterNames) {
+            try {
+                $result = Process-EKSCluster -Item $clusterName -Credential $Credential -Region $Region -AccountInfo $AccountInfo -AccountAlias $AccountAlias
+                if ($result) { $result }
+            } catch {
+                Write-ScriptOutput "EKS: Failed processing cluster $clusterName in $Region : $_" -Level Warning
+            }
+        }
+    } catch {
+        Write-ScriptOutput "EKS: Error fetching clusters for $Region : $_" -Level Warning
+    }
+}
+
+function Process-EKSCluster {
+    param(
+        $Item,
+        $Credential,
+        [string]$Region,
+        $AccountInfo,
+        [string]$AccountAlias,
+        [string]$RoleArn
+    )
+
+    $clusterName = if ($Item -is [string]) { $Item }
+                   elseif ($Item.Name) { $Item.Name }
+                   elseif ($Item.name) { $Item.name }
+                   elseif ($Item.ClusterName) { $Item.ClusterName }
+                   else { $null }
+
+    if (-not $clusterName) {
+        $itemType = if ($Item) { $Item.GetType().FullName } else { 'Null' }
+        Write-ScriptOutput "EKS: Cluster name not found in item (type=${itemType}), skipping" -Level Warning
+        return $null
+    }
+
+    $kubernetesVersion = "Unknown"
+    try {
+        $clusterInfo = Get-EKSCluster -Name $clusterName -Credential $Credential -Region $Region -ErrorAction Stop
+        $kubernetesVersion = $clusterInfo.Version ?? "Unknown"
+    } catch {
+        Write-ScriptOutput "EKS: Failed to get cluster details for ${clusterName}: $_" -Level Warning
+    }
+
+    $tmpKube = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "kubeconfig_${clusterName}_${([guid]::NewGuid())}.yaml")
+
+    $oldEnv = @{
+        AWS_ACCESS_KEY_ID     = $env:AWS_ACCESS_KEY_ID
+        AWS_SECRET_ACCESS_KEY = $env:AWS_SECRET_ACCESS_KEY
+        AWS_SESSION_TOKEN     = $env:AWS_SESSION_TOKEN
+    }
+
+    try {
+        $accessKey = $null; $secretKey = $null; $sessionToken = $null
+
+        if ($Credential) {
+            if ($Credential.PSObject.Methods.Name -contains 'GetCredentials') {
+                try {
+                    $credsObj = $Credential.GetCredentials()
+                    if ($credsObj) {
+                        $accessKey    = $credsObj.AccessKey   ?? $accessKey
+                        $secretKey    = $credsObj.SecretKey   ?? $secretKey
+                        $sessionToken = $credsObj.Token       ?? $credsObj.SessionToken ?? $sessionToken
+                    }
+                } catch {}
+            }
+
+            $accessKey    = $accessKey    ?? $Credential.AccessKey ?? $Credential.AccessKeyId
+            $secretKey    = $secretKey    ?? $Credential.SecretKey ?? $Credential.SecretAccessKey
+            $sessionToken = $sessionToken ?? $Credential.SessionToken ?? $Credential.Token
+        }
+
+        if (-not $accessKey -and $AccountInfo -and $AccountInfo.AccessKey) {
+            $accessKey    = $AccountInfo.AccessKey
+            $secretKey    = $AccountInfo.SecretKey
+            $sessionToken = $AccountInfo.SessionToken
+        }
+
+        if ($accessKey -and $secretKey) {
+            $env:AWS_ACCESS_KEY_ID     = $accessKey
+            $env:AWS_SECRET_ACCESS_KEY = $secretKey
+            if ($sessionToken) { $env:AWS_SESSION_TOKEN = $sessionToken } else { Remove-Item Env:AWS_SESSION_TOKEN -ErrorAction SilentlyContinue }
+            Write-ScriptOutput "EKS: Exported AWS env vars for cluster '${clusterName}' (region ${Region})" -Level Info
+        }
+
+        $awsArgs = @('eks','update-kubeconfig','--name',$clusterName,'--region',$Region,'--kubeconfig',$tmpKube)
+        if ($RoleArn) { $awsArgs += @('--role-arn',$RoleArn) }
+        $updateResult = & aws @awsArgs 2>&1
+         if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tmpKube)) {
+             Write-ScriptOutput "EKS: Failed to update kubeconfig for ${clusterName} in ${Region}: ${updateResult}" -Level Warning
+             return [PSCustomObject]@{
+                 AwsAccountId    = "`u{200B}$($AccountInfo.Account)"
+                 AwsAccountAlias = $AccountInfo.AccountAlias
+                 Region          = $Region
+                 ClusterName     = $clusterName
+                 KubernetesVersion = $kubernetesVersion
+                 Count           = 1
+                 PVCCount        = 0
+                 SizeGiB         = 0
+                 SizeTiB         = 0
+                 SizeGB          = 0
+                 SizeTB          = 0
+                 PVCDetails      = ""
+                 NodeCount       = 0
+                 NodeDetails     = ""
+             }
+         }
+
+        $pvcCount = 0; $sizeBytes = 0; $pvcDetails = @()
+
+        if (Get-Command kubectl -ErrorAction SilentlyContinue) {
+            $env:KUBECONFIG = $tmpKube
+            $pvcRaw = & kubectl get pvc --all-namespaces -o custom-columns="NAMESPACE:.metadata.namespace,NAME:.metadata.name,VOLUME:.spec.volumeName,CAPACITY:.spec.resources.requests.storage,STATUS:.status.phase" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-ScriptOutput "EKS: kubectl get pvc failed for ${clusterName}, skipping PVCs: ${pvcRaw}" -Level Warning
+            } elseif ($pvcRaw) {
+                $lines = $pvcRaw -split "`n" | Where-Object { $_ -and $_ -notmatch '^NAMESPACE' }  # Skip header
+                foreach ($line in $lines) {
+                    if ($line -match '^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$') {
+                        $namespace = $matches[1]
+                        $name = $matches[2]
+                        $capacity = $matches[4]
+                        $status = $matches[5]
+                        if ($capacity -and $capacity -ne '<none>') {
+                            $bytes = Convert-K8sSizeToBytes -Size $capacity
+                            if ($bytes -gt 0) {
+                                $sizeBytes += $bytes
+                                $pvcCount++
+                                $pvcDetails += ("${namespace}/${name}:${capacity}:${status}")
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            Write-ScriptOutput "kubectl not available; skipping PVC enumeration for ${clusterName}" -Level Info
+        }
+
+        $nodeCount = 0
+        $nodeDetails = @()
+        if (Get-Command kubectl -ErrorAction SilentlyContinue) {
+            $env:KUBECONFIG = $tmpKube
+            # Get node names and provider IDs
+            $nodeRaw = & kubectl get nodes -o custom-columns="NAME:.metadata.name,PROVIDER_ID:.spec.providerID" 2>&1
+            if ($LASTEXITCODE -eq 0 -and $nodeRaw) {
+                $nodeLines = $nodeRaw | Where-Object { $_ -and $_.Trim() -ne "" -and -not $_.StartsWith("NAME") }
+                $nodeCount = $nodeLines.Count
+                foreach ($line in $nodeLines) {
+                    $parts = $line -split '\s+', 2
+                    if ($parts.Count -ge 2) {
+                        $nodeName = $parts[0].Trim()
+                        $providerId = $parts[1].Trim()
+                        $instanceType = '<none>'
+                        if ($providerId -and $providerId -match 'aws://.*/(.*)') {
+                            $instanceId = $matches[1]
+                            try {
+                                $ec2Instance = Get-EC2Instance -InstanceId $instanceId -Credential $Credential -Region $Region -ErrorAction Stop
+                                if ($ec2Instance -and $ec2Instance.Instances) {
+                                    $instanceType = $ec2Instance.Instances[0].InstanceType.Value
+                                }
+                            } catch {
+                                Write-ScriptOutput "EKS: Failed to get instance type for node ${nodeName} (ID: ${instanceId}): $_" -Level Warning
+                            }
+                        }
+                        $nodeDetails += "${nodeName}:${instanceType}"
+                    }
+                }
+            } else {
+                Write-ScriptOutput "EKS: kubectl get nodes failed for ${clusterName}, skipping nodes: ${nodeRaw}" -Level Warning
+            }
+        } else {
+            Write-ScriptOutput "kubectl not available; skipping node enumeration for ${clusterName}" -Level Info
+        }
+
+        $sizeGiB = [math]::Round($sizeBytes / 1GB, 4)
+        $sizeTiB = [math]::Round($sizeGiB / 1024, 6)
+        $sizeGB  = [math]::Round($sizeGiB * 1.073741824, 4)
+        $sizeTB  = [math]::Round($sizeGB / 1024, 6)
+
+        return [PSCustomObject]@{
+            AwsAccountId    = "`u{200B}$($AccountInfo.Account)"
+            AwsAccountAlias = $AccountInfo.AccountAlias
+            Region          = $Region
+            ClusterName     = $clusterName
+            KubernetesVersion = $kubernetesVersion
+            Count           = 1
+            PVCCount        = $pvcCount
+            NodeCount       = $nodeCount
+            SizeGiB         = $sizeGiB
+            SizeTiB         = $sizeTiB
+            SizeGB          = $sizeGB
+            SizeTB          = $sizeTB
+            PVCDetails      = ($pvcDetails -join ";")
+            NodeDetails     = ($nodeDetails -join ";")
+        }
+
+    } catch {
+        Write-ScriptOutput "EKS: Exception processing cluster ${clusterName}: $_" -Level Warning
+        return $null
+    } finally {
+        try { if (Test-Path $tmpKube) { Remove-Item $tmpKube -Force -ErrorAction SilentlyContinue } } catch {}
+        Remove-Item Env:KUBECONFIG -ErrorAction SilentlyContinue
+        foreach ($k in $oldEnv.Keys) {
+            if ($null -ne $oldEnv[$k]) { ${env:$k} = $oldEnv[$k] } else { Remove-Item Env:$k -ErrorAction SilentlyContinue }
+        }
+    }
+}
 
 function Process-UnattachedVolume {
     param($Item, $Credential, $Region, $AccountInfo, $AccountAlias)
-    
+
     $volumeTags = @()
     try {
         $tagFilter = @{
@@ -1000,7 +1292,7 @@ function Process-UnattachedVolume {
         }
         $tagResponse = Get-EC2Tag -Filter $tagFilter -Credential $Credential -Region $Region -ErrorAction Stop
         $volumeTags = $tagResponse
-        
+
         if ($volumeTags -and $volumeTags.Count -gt 0) {
             Write-ScriptOutput "Retrieved $($volumeTags.Count) tags for volume $($Item.VolumeId)" -Level Info
         }
@@ -1017,10 +1309,10 @@ function Process-UnattachedVolume {
             Write-ScriptOutput "Failed to get tags for volume $($Item.VolumeId): $($_.Exception.Message)" -Level Warning
         }
     }
-    
+
     $volumeBytes = $Item.Size * 1GB
     $sizes = Convert-BytesToSizes -Bytes $volumeBytes
-    
+
     $volumeObj = [PSCustomObject]@{
         AwsAccountId = "`u{200B}$($AccountInfo.Account)"
         AwsAccountAlias = $AccountAlias
@@ -1035,9 +1327,9 @@ function Process-UnattachedVolume {
         SizeGB = $sizes.SizeGB
         SizeTB = $sizes.SizeTB
     }
-    
+
     Add-TagProperties -Object $volumeObj -Tags $volumeTags
-    
+
     return $volumeObj
 }
 
@@ -1050,8 +1342,8 @@ function Process-RDSInstance {
         }
 
         $sizeGB = 0
-        if ($Item.AllocatedStorage) { 
-            $sizeGB = [double]$Item.AllocatedStorage 
+        if ($Item.AllocatedStorage) {
+            $sizeGB = [double]$Item.AllocatedStorage
         }
 
         if ($Item.Engine -match '^(?i:aurora)') {
@@ -1079,7 +1371,7 @@ function Process-RDSInstance {
                     Region     = $Region
                 }
                 $metric = Get-SafeCWMetricStatistic -Namespace 'AWS/RDS' -MetricName 'VolumeBytesUsed' -Dimensions @(@{ Name = 'DBClusterIdentifier'; Value = $clusterId }) -Period 86400 -Statistics 'Maximum' -StartTime $utcStartTime -EndTime $utcEndTime -Credential $Credential -Region $Region
-                
+
                 if ($metric -and $metric.Datapoints) {
                     $mv = ($metric.Datapoints | Sort-Object Timestamp -Descending | Select-Object -First 1).Maximum
                     if ($mv -and $mv -gt 0) {
@@ -1295,11 +1587,11 @@ function New-ServiceSummaryData {
         [string]$ServiceName,
         [array]$ServiceList
     )
-    
+
     $serviceConfig = $script:ServiceRegistry[$ServiceName]
     $summaryData = @()
     $totalCount = if ($ServiceList) { $ServiceList.Count } else { 0 }
-    
+
     $totals = if ($ServiceName -eq "S3") {
         Get-S3ServiceTotals -ServiceList $ServiceList
     } elseif ($ServiceName -eq "FSX") {
@@ -1319,11 +1611,11 @@ function New-ServiceSummaryData {
 
     if ($ServiceName -eq "FSX" -and $ServiceList -and $ServiceList.Count -gt 0) {
         $fsxTypes = $ServiceList | Select-Object -ExpandProperty Type -Unique | Sort-Object
-        
+
         foreach ($fsxType in $fsxTypes) {
             $typeItems = $ServiceList | Where-Object { $_.Type -eq $fsxType }
             $typeTotals = Get-FSxServiceTotals -ServiceList $typeItems
-            
+
             $summaryData += [PSCustomObject]@{
                 "ResourceType" = $fsxType
                 "Region" = "All"
@@ -1334,7 +1626,7 @@ function New-ServiceSummaryData {
                 "Total Size (TB)" = [math]::Round($typeTotals.TB, 4)
             }
         }
-        
+
         $summaryData += [PSCustomObject]@{
             "ResourceType" = "Total"
             "Region" = "All"
@@ -1359,28 +1651,32 @@ function New-ServiceSummaryData {
             $row["Total Table Size (Bytes)"] = $totalTableBytes
             $row["Total Item Count"] = $totalItemCount
         }
+        if ($ServiceName -eq "EKS") {
+            $totalNodeCount = ($ServiceList | ForEach-Object { if ($_.NodeCount -ne $null) { [int]$_.NodeCount } else { 0 } } | Measure-Object -Sum).Sum
+            $row["Total Node Count"] = $totalNodeCount
+        }
         $summaryData += [PSCustomObject]$row
     }
-    
+
     $summaryData += Get-EmptyRow
     $summaryData += Get-EmptyRow
 
     $summaryData += Get-RegionalBreakdown -ServiceName $ServiceName -ServiceList $ServiceList
-    
+
     return $summaryData
 }
 
 function Get-RegionalBreakdown {
     param([string]$ServiceName, [array]$ServiceList)
-    
-    $regions = if ($ServiceList) { 
-        $ServiceList | Select-Object -ExpandProperty Region -Unique | Sort-Object 
+
+    $regions = if ($ServiceList) {
+        $ServiceList | Select-Object -ExpandProperty Region -Unique | Sort-Object
     } else { @() }
-    
+
     if ($regions.Count -eq 0) { return @() }
-    
+
     $breakdownData = @()
-    
+
     $header = [ordered]@{
         "ResourceType" = "--- $($ServiceName.ToUpper()) REGIONAL BREAKDOWN ---"
         "Region" = ""
@@ -1393,6 +1689,9 @@ function Get-RegionalBreakdown {
     if ($ServiceName -eq "DynamoDB") {
         $header["Total Table Size (Bytes)"] = ""
         $header["Total Item Count"] = ""
+    }
+    if ($ServiceName -eq "EKS") {
+        $header["Total Node Count"] = ""
     }
     $breakdownData += [PSCustomObject]$header
 
@@ -1422,7 +1721,7 @@ function Get-RegionalBreakdown {
         }
         $breakdownData += [PSCustomObject]$colHeader
     }
-    
+
     if ($ServiceName -eq "FSX") {
         $breakdownData += Get-FSxRegionalBreakdown -ServiceList $ServiceList -Regions $regions
     } else {
@@ -1451,18 +1750,22 @@ function Get-RegionalBreakdown {
                     $row["Total Table Size (Bytes)"] = $regionBytes
                     $row["Total Item Count"] = $regionItemsCount
                 }
+                if ($ServiceName -eq "EKS") {
+                    $regionNodeCount = ($regionItems | ForEach-Object { if ($_.NodeCount -ne $null) { [int]$_.NodeCount } else { 0 } } | Measure-Object -Sum).Sum
+                    $row["Total Node Count"] = $regionNodeCount
+                }
 
                 $breakdownData += [PSCustomObject]$row
             }
         }
     }
-    
+
     return $breakdownData
 }
 
 function Get-StandardServiceTotals {
     param([array]$ServiceList, [string]$SizeProperty)
-    
+
     if (-not $ServiceList -or $ServiceList.Count -eq 0) {
         return @{ GiB = 0; TiB = 0; GB = 0; TB = 0 }
     }
@@ -1503,7 +1806,7 @@ function Get-StandardServiceTotals {
         $tb  = & $sumProp @('TotalSizeTB','SizeTB','StorageCapacityTB','TableSizeTB','VolumesSizeTB')
 
         if ($giB -eq 0 -and $gb -gt 0) {
-            $giB = $gb / (1024/1000)  
+            $giB = $gb / (1024/1000)
         }
         if ($tib -eq 0 -and $giB -gt 0) { $tib = $giB / 1024 }
         if ($tb -eq 0 -and $gb -gt 0) { $tb = $gb / 1000 }
@@ -1516,7 +1819,7 @@ function Get-StandardServiceTotals {
 
 function Get-S3ServiceTotals {
     param([array]$ServiceList)
-    
+
     if (-not $ServiceList -or $ServiceList.Count -eq 0) {
         return @{ GiB = 0; TiB = 0; GB = 0; TB = 0 }
     }
@@ -1544,7 +1847,7 @@ function Get-S3ServiceTotals {
         }
     }
 
-    if ($totalGiB -eq 0 -and $totalGB -gt 0) { $totalGiB = $totalGB / (1024/1000) }   # approx GB -> GiB
+    if ($totalGiB -eq 0 -and $totalGB -gt 0) { $totalGiB = $totalGB / (1024/1000) }   
     if ($totalTiB -eq 0 -and $totalGiB -gt 0) { $totalTiB = $totalGiB / 1024 }
     if ($totalTB -eq 0 -and $totalGB -gt 0) { $totalTB = $totalGB / 1000 }
 
@@ -1552,11 +1855,11 @@ function Get-S3ServiceTotals {
 }
 function Get-FSxServiceTotals {
     param([array]$ServiceList)
-    
+
     if (-not $ServiceList -or $ServiceList.Count -eq 0) {
         return @{ GiB = 0; TiB = 0; GB = 0; TB = 0 }
     }
-    
+
     return @{
         GiB = ($ServiceList.StorageCapacityGiB | Measure-Object -Sum).Sum
         TiB = ($ServiceList.StorageCapacityTiB | Measure-Object -Sum).Sum
@@ -1567,10 +1870,10 @@ function Get-FSxServiceTotals {
 
 function Get-FSxRegionalBreakdown {
     param([array]$ServiceList, [array]$Regions)
-    
+
     $breakdownData = @()
     $fsxTypes = $ServiceList | Select-Object -ExpandProperty Type -Unique | Sort-Object
-    
+
     foreach ($region in $Regions) {
         $breakdownData += [PSCustomObject]@{
             "ResourceType" = $region
@@ -1581,12 +1884,12 @@ function Get-FSxRegionalBreakdown {
             "Total Size (TiB)" = ""
             "Total Size (TB)" = ""
         }
-        
+
         foreach ($fsxType in $fsxTypes) {
             $regionTypeFsx = $ServiceList | Where-Object { $_.Region -eq $region -and $_.Type -eq $fsxType }
             if ($regionTypeFsx.Count -gt 0) {
                 $typeTotals = Get-FSxServiceTotals -ServiceList $regionTypeFsx
-                
+
                 $breakdownData += [PSCustomObject]@{
                     "ResourceType" = ""
                     "Region" = $fsxType
@@ -1599,7 +1902,7 @@ function Get-FSxRegionalBreakdown {
             }
         }
     }
-    
+
     return $breakdownData
 }
 
@@ -1607,11 +1910,11 @@ function Get-FSxRegionalBreakdown {
 
 function New-AccountLevelSummary {
     param([string]$AccountId, [string]$AccountAlias)
-    
+
     try {
         $accountSummaryFile = "${AccountId}_summary_$date_string.xlsx"
         $dataSheets = [ordered]@{}
-        
+
         foreach ($serviceName in $script:ServiceRegistry.Keys) {
             $serviceList = $script:ServiceDataByAccount[$AccountId][$serviceName]
             $summarySheetName = if ($serviceName -eq "UnattachedVolumes") {
@@ -1620,10 +1923,11 @@ function New-AccountLevelSummary {
                 "FSx SVM Summary"
             } else {
                 "$serviceName Summary"
-            }            
-            $dataSheets[$summarySheetName] = New-ServiceSummaryData -ServiceName $serviceName -ServiceList $serviceList
-        }
-        
+            }
+            if ($serviceList -and $serviceList.Count -gt 0) {
+                $dataSheets[$summarySheetName] = New-ServiceSummaryData -ServiceName $serviceName -ServiceList $serviceList
+            }        }
+
         $detailSheets = @{
             "EC2 Details" = $script:ServiceDataByAccount[$AccountId]["EC2"]
             "S3 Details" = $script:ServiceDataByAccount[$AccountId]["S3"]
@@ -1634,6 +1938,7 @@ function New-AccountLevelSummary {
             "RDS Details" = $script:ServiceDataByAccount[$AccountId]["RDS"]
             "DynamoDB Details" = $script:ServiceDataByAccount[$AccountId]["DynamoDB"]
             "Redshift Details" = $script:ServiceDataByAccount[$AccountId]["Redshift"]
+            "EKS Details" = $script:ServiceDataByAccount[$AccountId]["EKS"]
         }
 
         foreach ($sheetName in $detailSheets.Keys) {
@@ -1641,7 +1946,7 @@ function New-AccountLevelSummary {
                 if ($sheetName -eq "S3 Details") {
                     $dataSheets[$sheetName] = $detailSheets[$sheetName] |
                         Select-Object AwsAccountId, AwsAccountAlias, Region, BucketName, CreationDate, SizeGiB, SizeTiB, SizeGB, SizeTB
-                }               
+                }
                 elseif ($sheetName -eq "FSx SVM Details") {
                     $svmItems = $detailSheets[$sheetName]
                     $tagProps = ($svmItems | ForEach-Object { $_.PSObject.Properties.Name } | Where-Object { $_ -like 'Tag_*' } | Sort-Object -Unique)
@@ -1661,14 +1966,14 @@ function New-AccountLevelSummary {
                 }
             }
         }
-        
+
         $result = Export-DataToExcel -FilePath $accountSummaryFile -DataSheets $dataSheets
-        
+
         if ($result) {
             Write-ScriptOutput "Account-level summary created: $accountSummaryFile" -Level Success
             $script:AllOutputFiles.Add($accountSummaryFile) | Out-Null
         }
-        
+
         return $result
     }
     catch {
@@ -1679,10 +1984,10 @@ function New-AccountLevelSummary {
 
 function Export-ServiceCSVFiles {
     param([string]$AccountId, [string]$AccountAlias)
-    
+
     try {
         $accountSuffix = if ($AccountAlias -and $AccountAlias -ne "Unknown") { $AccountAlias } else { $AccountId }
-        
+
         $outputFileEc2Instance = "${baseOutputEc2Instance}_${accountSuffix}_$date_string.csv"
         $outputFileEc2UnattachedVolume = "${baseOutputEc2UnattachedVolume}_${accountSuffix}_$date_string.csv"
         $outputFileS3 = "${baseOutputS3}_${accountSuffix}_$date_string.csv"
@@ -1704,6 +2009,7 @@ function Export-ServiceCSVFiles {
             RDS = @{ File = $outputFileRDS; Data = $script:ServiceDataByAccount[$AccountId]["RDS"] }
             DynamoDB = @{ File = $outputFileDynamoDB; Data = $script:ServiceDataByAccount[$AccountId]["DynamoDB"] }
             Redshift = @{ File = $outputFileRedshift; Data = $script:ServiceDataByAccount[$AccountId]["Redshift"] }
+            EKS = @{ File = $outputFileEKS; Data = $script:ServiceDataByAccount[$AccountId]["EKS"] }
         }
 
         foreach ($serviceName in $serviceExports.Keys) {
@@ -1738,40 +2044,40 @@ function Export-DataToExcel {
         [string]$FilePath,
         [System.Collections.IDictionary]$DataSheets
     )
-    
+
     try {
         if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
             Write-ScriptOutput "ImportExcel module not found. Install it with: Install-Module ImportExcel -Scope CurrentUser" -Level Warning
             return $false
         }
-        
+
         Import-Module ImportExcel -Force -ErrorAction Stop
         Write-ScriptOutput "Using ImportExcel module for Excel generation..." -Level Success
-        
+
         if (Test-Path $FilePath) {
             Remove-Item $FilePath -Force
         }
         $worksheetOrder = @(
             "EC2 Summary", "S3 Summary","EFS Summary", "FSX Summary","FSx SVM Summary",
-            "RDS Summary", "DynamoDB Summary", "Redshift Summary",  "Unattached Volume Summary", 
+            "RDS Summary", "DynamoDB Summary", "Redshift Summary","EKS Summary", "Unattached Volume Summary",
             "EC2 Details", "S3 Details", "EFS Details", "FSx Details", "FSx SVM Details",
-            "RDS Details", "DynamoDB Details", "Redshift Details", "Unattached Volumes"
+            "RDS Details", "DynamoDB Details", "Redshift Details", "EKS Details","Unattached Volumes Details"
         )
         foreach ($sheetName in $worksheetOrder) {
             if ($DataSheets.Keys -contains $sheetName) {
                 $data = $DataSheets[$sheetName]
                 $data | Export-Excel -Path $FilePath -WorksheetName $sheetName -AutoSize -FreezeTopRow -BoldTopRow
-                
+
                 if ($sheetName -like "*Summary*") {
                     try {
                         $excel = Open-ExcelPackage -Path $FilePath
                         $worksheet = $excel.Workbook.Worksheets[$sheetName]
-                        
+
                         for ($row = 1; $row -le $worksheet.Dimension.End.Row; $row++) {
                             $cellValue = $worksheet.Cells[$row, 1].Value
-                            if ($cellValue -and ($cellValue.ToString() -eq "Region" -or 
+                            if ($cellValue -and ($cellValue.ToString() -eq "Region" -or
                                 ($cellValue.ToString() -eq "Region" -and $worksheet.Cells[$row, 2].Value -eq "Type"))) {
-                                
+
                                 $prevRowValue = if ($row -gt 1) { $worksheet.Cells[$row-1, 1].Value } else { $null }
                                 if ($prevRowValue -and $prevRowValue.ToString() -like "*BREAKDOWN*") {
                                     for ($col = 1; $col -le $worksheet.Dimension.End.Column; $col++) {
@@ -1779,14 +2085,14 @@ function Export-DataToExcel {
                                     }
                                 }
                             }
-                        }                       
+                        }
                         Close-ExcelPackage $excel -Save
                     }
                     catch {
                         Write-ScriptOutput "Warning: Could not apply additional formatting to $sheetName : $_" -Level Warning
                     }
                 }
-                
+
             }
         }
         Write-ScriptOutput "Excel summary file created: $FilePath" -Level Success
@@ -1806,8 +2112,8 @@ function Get-S3BucketSize {
         $commonParams = @{
             Namespace  = 'AWS/S3'
             MetricName = 'BucketSizeBytes'
-            Period     = 86400          
-            Statistic  = 'Average'      
+            Period     = 86400
+            Statistic  = 'Average'
             Credential = $Credential
         }
 
@@ -1856,7 +2162,7 @@ function Get-S3BucketSize {
 }
 function Get-S3BucketSizeByStorageClass {
     param([string]$BucketName, [string]$StorageClass, [object]$Credential, [string]$Region)
-    
+
     try {
         $map = @{
             'STANDARD'             = 'StandardStorage'
@@ -1898,7 +2204,7 @@ function Get-S3BucketSizeAccurate {
         [object]$Credential,
         [string]$Region,
         [int]$MaxSeconds = 120,
-        [int]$MaxObjects = 100000 
+        [int]$MaxObjects = 100000
     )
 
     try {
@@ -1976,13 +2282,13 @@ function Get-S3BucketSizeAccurate {
 
 function Get-EFSFileSystemSize {
     param([object]$EFS, [object]$Credential, [string]$Region)
-    
+
     try {
         if ($EFS.SizeInBytes -and $EFS.SizeInBytes.Value -gt 0) {
             Write-ScriptOutput "Found direct size information (FileSystemSize object) for EFS $($EFS.FileSystemId): $([math]::Round($EFS.SizeInBytes.Value / 1GB, 2)) GB" -Level Info
             return $EFS.SizeInBytes.Value
         }
-        
+
         $metric = Get-SafeCWMetricStatistic -Namespace 'AWS/EFS' -MetricName 'StorageBytes' -Dimensions @{ Name='FileSystemId'; Value=$EFS.FileSystemId } -Period 86400 -Statistics 'Average' -StartTime $script:utcStartTime -EndTime $script:utcEndTime -Credential $Credential -Region $Region
 
         if ($metric -and $metric.Datapoints) {
@@ -1997,43 +2303,43 @@ function Get-EFSFileSystemSize {
 
 function Invoke-AWSDataCollection {
     param([object]$Credential)
-    
+
     try {
-        $queryRegion = if ($script:Config.Partition -eq "GovCloud") { 
-            $script:Config.DefaultGovCloudQueryRegion 
-        } else { 
-            $script:Config.DefaultQueryRegion 
+        $queryRegion = if ($script:Config.Partition -eq "GovCloud") {
+            $script:Config.DefaultGovCloudQueryRegion
+        } else {
+            $script:Config.DefaultQueryRegion
         }
-        
+
         $awsRegions = Get-ProcessingRegions -Credential $Credential -QueryRegion $queryRegion
         $accountInfo = Get-AWSAccountInfo -Credential $Credential -QueryRegion $queryRegion
-        
-        if (-not $accountInfo) { 
+
+        if (-not $accountInfo) {
             Write-ScriptOutput "Failed to get AWS account information" -Level Error
-            return 
+            return
         }
-        
+
         Write-ScriptOutput "Processing AWS Account: $($accountInfo.Account) ($($accountInfo.AccountAlias))" -Level Success
-        
+
         Initialize-ServiceCollections -AccountId $accountInfo.Account
         $script:AccountsProcessed += $accountInfo
-        
+
         $awsRegionCounter = 1
         foreach ($awsRegion in $awsRegions) {
             $awsRegion = Format-RegionName -Region $awsRegion
             Show-ScriptProgress -Activity "Region $awsRegion" -Status "Region $awsRegionCounter of $($awsRegions.Count)" -PercentComplete (($awsRegionCounter / $awsRegions.Count) * 100)
-            
+
             Set-RegionPartition -Region $awsRegion
-            
+
             foreach ($serviceName in $script:ServiceRegistry.Keys) {
                 Invoke-ServiceInventory -ServiceName $serviceName -Credential $Credential -Region $awsRegion -AccountInfo $accountInfo -AccountAlias $accountInfo.AccountAlias
             }
-            
+
             $awsRegionCounter++
         }
-        
+
         Write-ScriptOutput "Region processing completed for account $($accountInfo.Account)" -Level Success
-        
+
         New-AccountLevelSummary -AccountId $accountInfo.Account -AccountAlias $accountInfo.AccountAlias
     }
     catch {
@@ -2043,7 +2349,7 @@ function Invoke-AWSDataCollection {
 
 function Get-ProcessingRegions {
     param([object]$Credential, [string]$QueryRegion)
-    
+
     if ($Regions -and $Regions.Trim() -ne '') {
         return $Regions.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
     } else {
@@ -2059,16 +2365,16 @@ function Get-ProcessingRegions {
 
 function Get-AWSAccountInfo {
     param([object]$Credential, [string]$QueryRegion)
-    
+
     Write-ScriptOutput "Getting AWS account information..." -Level Info
     try {
         $awsAccountInfo = Get-STSCallerIdentity -Credential $Credential -Region $QueryRegion -ErrorAction Stop
-        $awsAccountAlias = try { 
-            Get-IAMAccountAlias -Credential $Credential -Region $QueryRegion -ErrorAction Stop 
-        } catch { 
-            "Unknown" 
+        $awsAccountAlias = try {
+            Get-IAMAccountAlias -Credential $Credential -Region $QueryRegion -ErrorAction Stop
+        } catch {
+            "Unknown"
         }
-        
+
         return @{
             Account = $awsAccountInfo.Account
             AccountAlias = $awsAccountAlias
@@ -2101,11 +2407,11 @@ function Set-RegionPartition {
 
 function Invoke-AuthenticationScenarios {
     $authFunctions = @{
-        AllLocalProfiles = { 
+        AllLocalProfiles = {
             try {
                 $profileLocationParams = $script:Config.ProfileLocation
                 Write-ScriptOutput "Using profile location parameters: $($profileLocationParams | ConvertTo-Json -Compress)" -Level Info
-                
+
                 if ($profileLocationParams.Count -gt 0) {
                     $profileFile = $profileLocationParams.ProfileLocation
                     if (Test-Path $profileFile) {
@@ -2121,10 +2427,10 @@ function Invoke-AuthenticationScenarios {
                 } else {
                     $allProfiles = Get-AWSCredential -ListProfiles
                 }
-                
+
                 Write-ScriptOutput "Found $($allProfiles.Count) profiles to process" -Level Info
-                
-                $allProfiles | ForEach-Object { 
+
+                $allProfiles | ForEach-Object {
                     Write-ScriptOutput "Processing profile: $_" -Level Info
                     try {
                         $cred = $null
@@ -2139,12 +2445,12 @@ function Invoke-AuthenticationScenarios {
                         }
                         catch {
                             Write-ScriptOutput "Failed to load credentials for profile '$_': $($_.Exception.Message)" -Level Error
-                            
+
                             if ($profileLocationParams.Count -gt 0) {
                                 Write-ScriptOutput "Skipping profile '$_' as custom ProfileLocation was specified but failed" -Level Warning
                                 return
                             }
-                            
+
                             try {
                                 Write-ScriptOutput "Attempting alternative credential loading for profile '$_'..." -Level Info
                                 $cred = Get-AWSCredential -ProfileName $_ -ErrorAction Stop
@@ -2155,10 +2461,10 @@ function Invoke-AuthenticationScenarios {
                                 return
                             }
                         }
-                        
-                        if ($cred) { 
+
+                        if ($cred) {
                             Write-ScriptOutput "Credential object obtained for profile '$_', proceeding with data collection" -Level Success
-                            Invoke-AWSDataCollection -Credential $cred 
+                            Invoke-AWSDataCollection -Credential $cred
                         } else {
                             Write-ScriptOutput "No credentials object returned for profile: $_" -Level Warning
                         }
@@ -2171,13 +2477,13 @@ function Invoke-AuthenticationScenarios {
                 Write-ScriptOutput "Error in AllLocalProfiles processing: $($_.Exception.Message)" -Level Error
             }
         }
-        UserSpecifiedProfiles = { 
+        UserSpecifiedProfiles = {
             $UserSpecifiedProfileNames.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object {
                 Write-ScriptOutput "Processing profile: $_" -Level Info
                 try {
                     $profileLocationParams = $script:Config.ProfileLocation
                     Write-ScriptOutput "Using profile location parameters: $($profileLocationParams | ConvertTo-Json -Compress)" -Level Info
-                    
+
                     $cred = $null
                     try {
                         if ($profileLocationParams.Count -gt 0) {
@@ -2190,12 +2496,12 @@ function Invoke-AuthenticationScenarios {
                     }
                     catch {
                         Write-ScriptOutput "Failed to load credentials for profile '$_': $($_.Exception.Message)" -Level Error
-                        
+
                         if ($profileLocationParams.Count -gt 0) {
                             Write-ScriptOutput "Skipping profile '$_' as custom ProfileLocation was specified but failed" -Level Warning
                             return
                         }
-                        
+
                         try {
                             Write-ScriptOutput "Attempting alternative credential loading for profile '$_'..." -Level Info
                             $cred = Get-AWSCredential -ProfileName $_ -ErrorAction Stop
@@ -2206,10 +2512,10 @@ function Invoke-AuthenticationScenarios {
                             return
                         }
                     }
-                    
-                    if ($cred) { 
+
+                    if ($cred) {
                         Write-ScriptOutput "Credential object obtained for profile '$_', proceeding with data collection" -Level Success
-                        Invoke-AWSDataCollection -Credential $cred 
+                        Invoke-AWSDataCollection -Credential $cred
                     } else {
                         Write-ScriptOutput "No credentials object returned for profile: $_" -Level Warning
                     }
@@ -2218,7 +2524,7 @@ function Invoke-AuthenticationScenarios {
                 }
             }
         }
-        CrossAccountRole = { 
+        CrossAccountRole = {
             function Assume-RoleOrFail {
                 param($AccountId)
 
@@ -2272,7 +2578,7 @@ function Invoke-AuthenticationScenarios {
                     $basicType = [System.Type]::GetType("Amazon.Runtime.BasicSessionAWSCredentials, AWSSDK.Core")
                     if (-not $basicType) {
                         try {
-                            $mods = Get-Module -ListAvailable | Where-Object { $_.ModuleBase } 
+                            $mods = Get-Module -ListAvailable | Where-Object { $_.ModuleBase }
                             $dllPath = $null
                             foreach ($m in $mods) {
                                 try {
@@ -2355,16 +2661,16 @@ function Invoke-AuthenticationScenarios {
                 Write-ScriptOutput "Cross-account role processing requires UserSpecifiedAccounts or UserSpecifiedAccountsFile" -Level Error
             }
         }
-        Default = { 
-            Invoke-AWSDataCollection -Credential $null 
+        Default = {
+            Invoke-AWSDataCollection -Credential $null
         }
     }
-    
+
     $scenario = if ($AllLocalProfiles) { 'AllLocalProfiles' }
                 elseif ($UserSpecifiedProfileNames) { 'UserSpecifiedProfiles' }
                 elseif ($CrossAccountRoleName) { 'CrossAccountRole' }
                 else { 'Default' }
-    
+
     Write-ScriptOutput "Executing authentication scenario: $scenario" -Level Info
     & $authFunctions[$scenario]
 }
@@ -2372,9 +2678,9 @@ function Invoke-AuthenticationScenarios {
 function ComprehensiveSummary {
     try {
         Write-ScriptOutput "Creating comprehensive summary across all accounts..." -Level Info
-        
+
         $comprehensiveData = @{}
-        
+
         foreach ($serviceName in $script:ServiceRegistry.Keys) {
             $allServiceData = @()
             foreach ($accountId in $script:ServiceDataByAccount.Keys) {
@@ -2385,10 +2691,10 @@ function ComprehensiveSummary {
             }
             $comprehensiveData[$serviceName] = $allServiceData
         }
-        
+
         $comprehensiveFile = "comprehensive_all_aws_accounts_summary_$date_string.xlsx"
         $dataSheets = [ordered]@{}
-        
+
         foreach ($serviceName in $script:ServiceRegistry.Keys) {
             $serviceList = $comprehensiveData[$serviceName]
             $summarySheetName = if ($serviceName -eq "UnattachedVolumes") {
@@ -2397,10 +2703,10 @@ function ComprehensiveSummary {
                 "FSx SVM Summary"
             }else {
                 "$serviceName Summary"
-            }            
+            }
             $dataSheets[$summarySheetName] = MultiAccountComprehensiveSummaryData -ServiceName $serviceName -ServiceList $serviceList
         }
-        
+
         $detailSheets = @{
             "EC2 Details" = $comprehensiveData["EC2"]
             "S3 Details" = $comprehensiveData["S3"]
@@ -2409,10 +2715,11 @@ function ComprehensiveSummary {
             "FSx Details" = $comprehensiveData["FSX"]
             "FSx SVM Details" = $comprehensiveData["FSX_SVM"]
             "RDS Details" = $comprehensiveData["RDS"]
+            "EKS Details" = $comprehensiveData["EKS"]
             "DynamoDB Details" = $comprehensiveData["DynamoDB"]
             "Redshift Details" = $comprehensiveData["Redshift"]
         }
-        
+
         foreach ($sheetName in $detailSheets.Keys) {
             if ($detailSheets[$sheetName] -and $detailSheets[$sheetName].Count -gt 0) {
                 if ($sheetName -eq "S3 Details") {
@@ -2438,9 +2745,9 @@ function ComprehensiveSummary {
                 }
             }
         }
-        
+
         $result = Export-DataToExcel -FilePath $comprehensiveFile -DataSheets $dataSheets
-        
+
         if ($result) {
             Write-ScriptOutput "Comprehensive summary created: $comprehensiveFile" -Level Success
             $script:AllOutputFiles.Add($comprehensiveFile) | Out-Null
@@ -2456,10 +2763,10 @@ function MultiAccountComprehensiveSummaryData {
         [string]$ServiceName,
         [array]$ServiceList
     )
-    
+
     $serviceConfig = $script:ServiceRegistry[$ServiceName]
     $summaryData = @()
-    
+
     if (-not $ServiceList -or $ServiceList.Count -eq 0) {
         $displayName = "$ServiceName $($serviceConfig.DisplayName)"
         $row = [ordered]@{
@@ -2475,12 +2782,15 @@ function MultiAccountComprehensiveSummaryData {
             $row["Total Table Size (Bytes)"] = 0
             $row["Total Item Count"] = 0
         }
+        if ($ServiceName -eq "EKS") {
+            $row["Total Node Count"] = 0
+        }
         $summaryData += [PSCustomObject]$row
         return $summaryData
     }
-    
+
     $accounts = $ServiceList | Select-Object -ExpandProperty AwsAccountId -Unique | Sort-Object
-    
+
     foreach ($accountId in $accounts) {
         $accountItems = $ServiceList | Where-Object { $_.AwsAccountId -eq $accountId }
         $accountTotals = if ($ServiceName -eq "S3") {
@@ -2510,7 +2820,7 @@ function MultiAccountComprehensiveSummaryData {
 
         $summaryData += [PSCustomObject]$row
     }
-    
+
     $grandTotals = if ($ServiceName -eq "S3") {
         Get-S3ServiceTotals -ServiceList $ServiceList
     } elseif ($ServiceName -eq "FSX") {
@@ -2518,7 +2828,7 @@ function MultiAccountComprehensiveSummaryData {
     } else {
         Get-StandardServiceTotals -ServiceList $ServiceList -SizeProperty $serviceConfig.SizeProperty
     }
-    
+
     $totalRow = [ordered]@{
         "ResourceType" = "Total"
         "Region" = "All"
@@ -2534,27 +2844,31 @@ function MultiAccountComprehensiveSummaryData {
         $totalRow["Total Table Size (Bytes)"] = $grandBytes
         $totalRow["Total Item Count"] = $grandItems
     }
+    if ($ServiceName -eq "EKS") {
+        $grandNodeCount = ($ServiceList | ForEach-Object { if ($_.NodeCount -ne $null) { [int]$_.NodeCount } else { 0 } } | Measure-Object -Sum).Sum
+        $totalRow["Total Node Count"] = $grandNodeCount
+    }
     $summaryData += [PSCustomObject]$totalRow
-    
+
     $summaryData += Get-EmptyRow
     $summaryData += Get-EmptyRow
 
     $summaryData += Get-MultiAccountRegionalBreakdown -ServiceName $ServiceName -ServiceList $ServiceList -Accounts $accounts
-    
+
     return $summaryData
 }
 
 function Get-MultiAccountRegionalBreakdown {
     param([string]$ServiceName, [array]$ServiceList, [array]$Accounts)
-    
-    $regions = if ($ServiceList) { 
-        $ServiceList | Select-Object -ExpandProperty Region -Unique | Sort-Object 
+
+    $regions = if ($ServiceList) {
+        $ServiceList | Select-Object -ExpandProperty Region -Unique | Sort-Object
     } else { @() }
-    
+
     if ($regions.Count -eq 0) { return @() }
-    
+
     $breakdownData = @()
-    
+
     $header = [ordered]@{
         "ResourceType" = "--- $($ServiceName.ToUpper()) REGIONAL BREAKDOWN ---"
         "Region" = ""
@@ -2567,6 +2881,9 @@ function Get-MultiAccountRegionalBreakdown {
     if ($ServiceName -eq "DynamoDB") {
         $header["Total Table Size (Bytes)"] = ""
         $header["Total Item Count"] = ""
+    }
+    if ($ServiceName -eq "EKS") {
+        $header["Total Node Count"] = ""
     }
     $breakdownData += [PSCustomObject]$header
 
@@ -2583,11 +2900,14 @@ function Get-MultiAccountRegionalBreakdown {
         $colHeader["Total Table Size (Bytes)"] = "Total Table Size (Bytes)"
         $colHeader["Total Item Count"] = "Total Item Count"
     }
+    if ($ServiceName -eq "EKS") {
+        $colHeader["Total Node Count"] = "Total Node Count"
+    }
     $breakdownData += [PSCustomObject]$colHeader
 
     foreach ($region in $regions) {
         $regionItems = $ServiceList | Where-Object Region -eq $region
-        
+
         if ($regionItems.Count -gt 0) {
             $regionTotals = if ($ServiceName -eq "S3") {
                 Get-S3ServiceTotals -ServiceList $regionItems
@@ -2596,7 +2916,7 @@ function Get-MultiAccountRegionalBreakdown {
             } else {
                 Get-StandardServiceTotals -ServiceList $regionItems -SizeProperty $script:ServiceRegistry[$ServiceName].SizeProperty
             }
-            
+
             $regionRow = [ordered]@{
                 "ResourceType" = $region
                 "Region" = ""
@@ -2612,8 +2932,12 @@ function Get-MultiAccountRegionalBreakdown {
                 $regionRow["Total Table Size (Bytes)"] = $regionBytes
                 $regionRow["Total Item Count"] = $regionItemsCount
             }
+            if ($ServiceName -eq "EKS") {
+                $regionNodeCount = ($regionItems | ForEach-Object { if ($_.NodeCount -ne $null) { [int]$_.NodeCount } else { 0 } } | Measure-Object -Sum).Sum
+                $regionRow["Total Node Count"] = $regionNodeCount
+            }
             $breakdownData += [PSCustomObject]$regionRow
-            
+
             foreach ($accountId in $Accounts) {
                 $regionAccountItems = $regionItems | Where-Object { $_.AwsAccountId -eq $accountId }
                 if ($regionAccountItems.Count -gt 0) {
@@ -2624,7 +2948,7 @@ function Get-MultiAccountRegionalBreakdown {
                     } else {
                         Get-StandardServiceTotals -ServiceList $regionAccountItems -SizeProperty $script:ServiceRegistry[$ServiceName].SizeProperty
                     }
-                    
+
                     $acctRow = [ordered]@{
                         "ResourceType" = ""
                         "Region" = "`u{200B}$accountId"
@@ -2640,40 +2964,44 @@ function Get-MultiAccountRegionalBreakdown {
                         $acctRow["Total Table Size (Bytes)"] = $acctBytes
                         $acctRow["Total Item Count"] = $acctItems
                     }
+                    if ($ServiceName -eq "EKS") {
+                        $accountRegionNodeCount = ($regionAccountItems | ForEach-Object { if ($_.NodeCount -ne $null) { [int]$_.NodeCount } else { 0 } } | Measure-Object -Sum).Sum
+                        $acctRow["Total Node Count"] = $accountRegionNodeCount
+                    }
                     $breakdownData += [PSCustomObject]$acctRow
                 }
             }
         }
     }
-    
+
     return $breakdownData
 }
 
 function New-OutputArchive {
     try {
         Write-ScriptOutput "Creating output archive..." -Level Info
-        
+
         if (Test-Path $archiveFile) {
             Remove-Item $archiveFile -Force
         }
-        
+
         $filesToArchive = $script:AllOutputFiles | Where-Object { Test-Path $_ }
-        
+
         if ($filesToArchive.Count -gt 0) {
             Add-Type -AssemblyName System.IO.Compression.FileSystem
-            
+
             $archive = [System.IO.Compression.ZipFile]::Open($archiveFile, [System.IO.Compression.ZipArchiveMode]::Create)
-            
+
             foreach ($file in $filesToArchive) {
                 $fileName = Split-Path $file -Leaf
                 Write-ScriptOutput "Adding $fileName to archive..." -Level Info
                 [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file, $fileName) | Out-Null
             }
-            
+
             $archive.Dispose()
-            
+
             Write-ScriptOutput "Archive created: $archiveFile" -Level Success
-            
+
             if (Test-Path $archiveFile) {
                 foreach ($file in $filesToArchive) {
                     try {
@@ -2700,7 +3028,7 @@ try {
     Write-ScriptOutput "=== AWS Cost Sizing Analysis Started ===" -Level Success
     Write-ScriptOutput "Log file: $script:LogFile" -Level Info
     Write-ScriptOutput "Script supports the following services: $($script:ServiceRegistry.Keys -join ', ')" -Level Info
-    
+
     if ($ProfileLocation) {
         Write-ScriptOutput "ProfileLocation parameter provided: $ProfileLocation" -Level Info
         if (Test-Path $ProfileLocation) {
@@ -2711,13 +3039,13 @@ try {
     } else {
         Write-ScriptOutput "No ProfileLocation parameter provided, using default AWS credentials" -Level Info
     }
-    
+
     if ($UserSpecifiedProfileNames) {
         Write-ScriptOutput "UserSpecifiedProfileNames: $UserSpecifiedProfileNames" -Level Info
         $profileList = $UserSpecifiedProfileNames.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
         Write-ScriptOutput "Parsed profiles: $($profileList -join ', ')" -Level Info
     }
-    
+
     $requiredModules = @('AWS.Tools.Common', 'ImportExcel')
     foreach ($module in $requiredModules) {
         if (-not (Get-Module -ListAvailable -Name $module)) {
@@ -2726,14 +3054,14 @@ try {
         }
     }
     Invoke-AuthenticationScenarios
-    
+
     Write-ScriptOutput "=== Processing Summary ===" -Level Success
     Write-ScriptOutput "Accounts processed: $($script:AccountsProcessed.Count)" -Level Info
-    
+
     if ($script:AccountsProcessed.Count -gt 0) {
         ComprehensiveSummary
     }
-    
+
     foreach ($account in $script:AccountsProcessed) {
         Write-ScriptOutput "Account: $($account.Account) ($($account.AccountAlias))" -Level Info
         foreach ($serviceName in $script:ServiceRegistry.Keys) {
@@ -2741,11 +3069,11 @@ try {
             Write-ScriptOutput "  $serviceName`: $count items" -Level Info
         }
     }
-    
+
     if ($SelectiveZipping -and $script:AllOutputFiles.Count -gt 1) {
         New-OutputArchive
     }
-    
+
     $executionTime = (Get-Date) - $script:startTime
     Write-ScriptOutput "Total execution time: $($executionTime.ToString('hh\:mm\:ss'))" -Level Success
     Write-ScriptOutput "Log file created: $script:LogFile" -Level Info
