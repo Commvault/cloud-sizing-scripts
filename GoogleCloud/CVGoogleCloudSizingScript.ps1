@@ -130,7 +130,7 @@ param(
     [switch]$LightMode,               # Leaner concurrency model
     [switch]$ForceKubectl,            # Require kubectl to be present (fail if cannot provision)
     [int]$MaxVMThreads                = 10,
-    [int]$MaxBucketThreads            = 20,
+    [int]$MaxBucketThreads            = 10,
     [int]$VMProjectTimeoutSec         = 600,   # 10m
     [int]$BucketProjectListTimeoutSec = 300,   # 5m
     [int]$BucketSizingTimeoutSec      = 1200,  # 20m
@@ -1087,7 +1087,7 @@ function Get-GcpStorageInventory {
     }
 
     # Phase 2: Concurrent sizing of all buckets globally
-    $maxBucketThreads = [Math]::Min(20,[Math]::Max(1,$allBucketDescriptors.Count))
+    $maxBucketThreads = [Math]::Min(10,[Math]::Max(1,$allBucketDescriptors.Count))
     Write-Log -Level INFO -Message ("[Buckets-Phase2] Sizing {0} buckets with maxThreads={1}" -f $allBucketDescriptors.Count,$maxBucketThreads)
     $iss2 = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     $pool2 = [RunspaceFactory]::CreateRunspacePool(1,$maxBucketThreads,$iss2,$Host); $pool2.Open()
@@ -1740,8 +1740,20 @@ function Get-GcpBigQueryDatasets {
     $maxThreads = if (Get-Variable -Name MaxBigQueryTableThreads -Scope Script -ErrorAction SilentlyContinue) { [int]$script:MaxBigQueryTableThreads } else { 5 }
     if ($maxThreads -lt 1) { $maxThreads = 1 }
     if ($tableTotal -lt $maxThreads) { $maxThreads = $tableTotal }
-    $parallelEnabled = $false; try { $parallelEnabled = [bool]$script:EnableBigQueryParallelTables } catch {}
-    $useParallel = $parallelEnabled -and ($tableTotal -gt 0) -and ($maxThreads -gt 1)
+
+    # Determine if parallel table metadata retrieval is enabled.
+    # New default: ON (previously OFF unless EnableBigQueryParallelTables was explicitly set)
+    # Override precedence:
+    #   1. $script:DisableBigQueryParallelTables = $true  -> force OFF
+    #   2. $script:EnableBigQueryParallelTables  (legacy flag) respected if present
+    $parallelEnabled = $true
+    if (Get-Variable -Name EnableBigQueryParallelTables -Scope Script -ErrorAction SilentlyContinue) {
+        try { $parallelEnabled = [bool]$script:EnableBigQueryParallelTables } catch { $parallelEnabled = $true }
+    }
+    if (Get-Variable -Name DisableBigQueryParallelTables -Scope Script -ErrorAction SilentlyContinue) {
+        try { if ([bool]$script:DisableBigQueryParallelTables) { $parallelEnabled = $false } } catch {}
+    }
+    $useParallel = $parallelEnabled -and ($tableTotal -gt 0) -and ($maxThreads -gt 1) -and (-not $bulkSuccess)
     if ($useParallel) {
         Write-Log ("[DB][BigQuery] ({0}) Dataset={1} LightParallel Threads={2} Tables={3}" -f $ProjectId,$datasetId,$maxThreads,$tableTotal) -Level DEBUG
     } else {
