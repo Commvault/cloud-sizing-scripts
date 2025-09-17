@@ -105,7 +105,7 @@ aws_secret_access_key = <SecretKey2>
 ```
 
 - Accounts.txt (one AWS account ID per line, no commas):
-```ini
+```text
 123456789012
 987654321098
 555555555555
