@@ -130,7 +130,7 @@ param(
     [switch]$LightMode,               # Leaner concurrency model
     [switch]$ForceKubectl,            # Require kubectl to be present (fail if cannot provision)
     [int]$MaxVMThreads                = 10,
-    [int]$MaxBucketThreads            = 20,
+    [int]$MaxBucketThreads            = 10,
     [int]$VMProjectTimeoutSec         = 600,   # 10m
     [int]$BucketProjectListTimeoutSec = 300,   # 5m
     [int]$BucketSizingTimeoutSec      = 1200,  # 20m
@@ -1087,7 +1087,7 @@ function Get-GcpStorageInventory {
     }
 
     # Phase 2: Concurrent sizing of all buckets globally
-    $maxBucketThreads = [Math]::Min(20,[Math]::Max(1,$allBucketDescriptors.Count))
+    $maxBucketThreads = [Math]::Min(10,[Math]::Max(1,$allBucketDescriptors.Count))
     Write-Log -Level INFO -Message ("[Buckets-Phase2] Sizing {0} buckets with maxThreads={1}" -f $allBucketDescriptors.Count,$maxBucketThreads)
     $iss2 = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     $pool2 = [RunspaceFactory]::CreateRunspacePool(1,$maxBucketThreads,$iss2,$Host); $pool2.Open()
