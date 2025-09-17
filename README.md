@@ -13,3 +13,7 @@ Discovers Azure cloud resources to assist with Commvault protection planning.
 ## Google Cloud
 Script: `GoogleCloud/CVGoogleCloudSizingScript.ps1`
 Discovers Google Cloud resources to assist with Commvault protection planning.
+
+## OCI
+Script: `OCI/CVOracleCloudSizingScript.py` 
+Discovers OCI cloud resources to assist with Commvault protection planning.
