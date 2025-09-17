@@ -23,9 +23,11 @@ Method 1 — Run in AWS CloudShell
    chmod +x CVAWSCloudSizingScript.ps1
    ```
 
-Method 2 — Run locally 
+Method 2 — Run locally
 1. Install PowerShell 7:
    https://github.com/PowerShell/PowerShell/releases
+2. Install AWS CLI:
+   https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
 3. Install required modules (example consolidated command):
    ```powershell
    # remove any loaded AWSTools modules first (optional)
@@ -37,7 +39,19 @@ Method 2 — Run locally
 
    Install-AWSToolsModule -Name AWS.Tools.Common,AWS.Tools.EC2,AWS.Tools.S3,AWS.Tools.SecurityToken,AWS.Tools.IdentityManagement,AWS.Tools.CloudWatch,AWS.Tools.RDS,AWS.Tools.DynamoDBv2,AWS.Tools.Redshift,AWS.Tools.FSx,AWS.Tools.ElasticFileSystem,AWS.Tools.EKS -Scope CurrentUser -CleanUp -Force -Confirm:$false
    ```
-4. Run the script with desired parameters:
+4. Verify required modules are installed:
+   ```powershell
+   Get-Module -ListAvailable AWS.Tools.* , ImportExcel | Select-Object Name, Version, Path
+   ```
+5. Fix unsigned script error:
+   If you encounter the following error when running the script on Windows:
+   .\CVAWSCloudSizingScript.ps1 cannot be loaded because it is not digitally signed.
+   This is due to PowerShell's execution policy restricting unsigned scripts. To temporarily allow the script to run in the current session, execute the following command in PowerShell (run as Administrator if necessary):
+
+   ```powershell
+   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+   ```
+6. Run the script with desired parameters:
    ```powershell
    ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-west-2"
    ```
@@ -73,4 +87,49 @@ Files are written to the working directory with timestamps:
 - `aws_sizing_script_output_YYYY-MM-DD_HHMMSS.log` — execution log
 - `aws_sizing_results_YYYY-MM-DD_HHMMSS.zip` — ZIP archive 
 
-**Note:** Ensure the executing user has all necessary AWS permissions. The required IAM permissions are included in the script header.
+**Required IAM Permissions**
+The executing user/role must have the following IAM permissions for the script to run successfully.
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "sts:GetCallerIdentity",
+                "sts:AssumeRole",
+                "iam:ListAccountAliases",
+                "ec2:DescribeRegions",
+                "ec2:DescribeInstances",
+                "ec2:DescribeVolumes",
+                "ec2:DescribeTags",
+                "s3:GetBucketLocation",
+                "s3:ListAllMyBuckets",
+                "s3:GetBucketTagging",
+                "s3:ListBucket",
+                "cloudwatch:GetMetricStatistics",
+                "cloudwatch:ListMetrics",
+                "elasticfilesystem:DescribeFileSystems",
+                "elasticfilesystem:ListTagsForResource",
+                "elasticfilesystem:DescribeTags",
+                "fsx:DescribeFileSystems",
+                "fsx:DescribeVolumes",
+                "fsx:ListTagsForResource",
+                "fsx:DescribeStorageVirtualMachines",
+                "rds:DescribeDBInstances",
+                "rds:ListTagsForResource",
+                "dynamodb:ListTables",
+                "dynamodb:DescribeTable",
+                "dynamodb:ListTagsOfResource",
+                "redshift:DescribeClusters",
+                "redshift:DescribeTags",
+                "eks:ListClusters",
+                "eks:DescribeCluster",
+                "eks:ListNodegroups",
+                "eks:ListTagsForResource"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
