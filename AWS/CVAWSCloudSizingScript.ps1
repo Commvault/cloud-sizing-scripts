@@ -99,84 +99,51 @@
     2. Authentication options:
        • Default IAM role (use -DefaultProfile, no creds needed)
        • Upload Creds.txt file and run with -UserSpecifiedProfileNames/-ProfileLocation
+    
+    3. Upload the Creds.txt file to CloudShell:
+       • Use the CloudShell upload button and upload the Creds.txt file to your CloudShell home directory.
 
-    3. Run the script from CloudShell after uploading:
-        pwsh
-       ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1"
+    4. Run the script from CloudShell:
+        • Using default IAM role:
+            pwsh
+            ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1"
+
+        • Using uploaded Creds.txt file with specific profiles:
+            pwsh
+            ./CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "Profile1,Profile2" -ProfileLocation "./Creds.txt" -Regions "us-east-1,us-west-2"
 
         SETUP INSTRUCTIONS FOR LOCAL SYSTEM (Laptop/Desktop):
     -----------------------------------------------------
     1. Install PowerShell 7:
-       https://github.com/PowerShell/PowerShell/releases
+        https://github.com/PowerShell/PowerShell/releases
 
-    2. Install required PowerShell modules:
-       Get-Module AWS.Tools.* | Remove-Module -Force
-       Install-Module -Name ImportExcel -Scope CurrentUser -Force -Confirm:$false
-       Install-Module -Name AWS.Tools.Installer -Scope CurrentUser -Force -Confirm:$false
-       Install-AWSToolsModule -Name AWS.Tools.Common,AWS.Tools.EC2,AWS.Tools.S3,AWS.Tools.SecurityToken,AWS.Tools.IdentityManagement,AWS.Tools.CloudWatch,AWS.Tools.RDS,AWS.Tools.DynamoDBv2,AWS.Tools.Redshift,AWS.Tools.FSx,AWS.Tools.EKS,AWS.Tools.ElasticFileSystem -Scope CurrentUser -CleanUp -Force -Confirm:$false
+    2. Install AWS CLI:
+        https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
 
-    3. Authentication:
-       • Preferred: Creds.txt file (AWS access/secret keys) with profiles
-       • Or: Use -ProfileLocation parameter to specify the creds file path
+    3. Install required PowerShell modules:
+        # Remove any loaded AWS.Tools modules first (optional)
+        Get-Module AWS.Tools.* | Remove-Module -Force
 
-    4. Run the script with selected profiles or accounts.
+        # Install ImportExcel and AWS.Tools installer, then required AWS modules
+        Install-Module -Name ImportExcel -Scope CurrentUser -Force -Confirm:$false
+        Install-Module -Name AWS.Tools.Installer -Scope CurrentUser -Force -Confirm:$false
+        Install-AWSToolsModule -Name AWS.Tools.Common,AWS.Tools.EC2,AWS.Tools.S3,AWS.Tools.SecurityToken,AWS.Tools.IdentityManagement,AWS.Tools.CloudWatch,AWS.Tools.RDS,AWS.Tools.DynamoDBv2,AWS.Tools.Redshift,AWS.Tools.FSx,AWS.Tools.ElasticFileSystem,AWS.Tools.EKS -Scope CurrentUser -CleanUp -Force -Confirm:$false
 
+    4. Verify required modules are installed:
+        Get-Module -ListAvailable AWS.Tools.* , ImportExcel | Select-Object Name, Version, Path
 
-    IAM Permissions:
-    ----------------
-    Use the following JSON policy (example) for cross-account or execution role:
-    {
-       "Version": "2012-10-17",
-       "Statement": [
-           {
-               "Effect": "Allow",
-               "Action": [
-                   "backup:ListBackupPlans",
-                   "backup:ListBackupSelections",
-                   "backup:GetBackupPlan",
-                   "backup:GetBackupSelection",
-                   "ce:GetCostAndUsage",
-                   "cloudwatch:GetMetricStatistics",
-                   "cloudwatch:ListMetrics",
-                   "cloudwatch:DescribeAlarms",
-                   "dynamodb:ListTables",
-                   "dynamodb:DescribeTable",
-                   "dynamodb:ListTagsOfResource",
-                   "ec2:DescribeInstances",
-                   "ec2:DescribeRegions",
-                   "ec2:DescribeVolumes",
-                   "ec2:DescribeSnapshots",
-                   "ec2:DescribeTags",
-                   "eks:DescribeCluster",
-                   "eks:ListClusters",
-                   "eks:ListNodegroups",
-                   "eks:ListTagsForResource",
-                   "elasticfilesystem:DescribeFileSystems",
-                   "elasticfilesystem:ListTagsForResource",
-                   "elasticfilesystem:DescribeTags",
-                   "fsx:DescribeFileSystems",
-                   "fsx:DescribeVolumes",
-                   "fsx:ListTagsForResource",
-                   "iam:ListAccountAliases",
-                   "kms:ListKeys",
-                   "organizations:ListAccounts",
-                   "rds:DescribeDBInstances",
-                   "rds:ListTagsForResource",
-                   "redshift:DescribeClusters",
-                   "redshift:DescribeTags",
-                   "s3:GetBucketLocation",
-                   "s3:ListAllMyBuckets",
-                   "s3:GetBucketTagging",
-                   "s3:ListBucket",
-                   "secretsmanager:ListSecrets",
-                   "sts:AssumeRole",
-                   "sts:GetCallerIdentity",
-                   "sqs:ListQueues"
-               ],
-               "Resource": "*"
-           }
-       ]
-    }
+    5. Fix unsigned script error (if needed):
+        If you see:
+            .\CVAWSCloudSizingScript.ps1 cannot be loaded because it is not digitally signed
+        Then temporarily allow scripts to run in this session:
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+    6. Authentication:
+        • Preferred: Creds.txt file (AWS access/secret keys) with profiles
+        • Or: Use -ProfileLocation parameter to specify the creds file path
+
+    7. Run the script with desired parameters:
+        ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-west-2"
 
     Credential Files:
     -----------------
@@ -238,6 +205,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $script:startTime = Get-Date
 $script:currentActivity = ""
 $script:moduleImportError = $false
+$script:KubectlInstalled = $false
 
 # Service configuration registry
 $script:ServiceRegistry = @{
@@ -1003,26 +971,52 @@ function Process-FSXStorageVirtualMachine {
     }
 }
 
- function Ensure-Kubectl {
+function Ensure-Kubectl {
     if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
-        Write-ScriptOutput "kubectl not found. PVC details will not be collected unless kubectl is installed." -Level Warning
+        Write-ScriptOutput "kubectl not found. Attempting to install for PVC/node enumeration." -Level Warning
 
-        # Optional: auto-download for Windows
         if ($env:OS -like "*Windows*") {
             try {
-                $kubectlUrl = "https://dl.k8s.io/release/v1.30.0/bin/windows/amd64/kubectl.exe"
-                $kubectlPath = "C:\kubectl\kubectl.exe"
-                if (-not (Test-Path "C:\kubectl")) { New-Item -ItemType Directory -Path "C:\kubectl" -Force | Out-Null }
+                $kubectlVersion = (Invoke-RestMethod https://dl.k8s.io/release/stable.txt).Trim()
+                $kubectlUrl = "https://dl.k8s.io/release/$kubectlVersion/bin/windows/amd64/kubectl.exe"
+                $kubectlDir = "C:\kubectl"
+                if (-not (Test-Path $kubectlDir)) {
+                    try {
+                        New-Item -ItemType Directory -Path $kubectlDir -Force | Out-Null
+                    } catch {
+                        $kubectlDir = Join-Path $env:TEMP "kubectl"
+                        if (-not (Test-Path $kubectlDir)) {
+                            New-Item -ItemType Directory -Path $kubectlDir -Force | Out-Null
+                        }
+                        Write-ScriptOutput "Using fallback path $kubectlDir instead of C:\kubectl" -Level Warning
+                    }
+                }
+
+                $kubectlPath = Join-Path $kubectlDir "kubectl.exe"
+
+                Write-ScriptOutput "Downloading kubectl from $kubectlUrl to $kubectlPath..." -Level Info
                 Invoke-WebRequest -Uri $kubectlUrl -OutFile $kubectlPath -UseBasicParsing
-                $env:Path += ";C:\kubectl"
-                Write-ScriptOutput "kubectl downloaded to $kubectlPath and added to PATH" -Level Info
+
+                $env:Path += ";$kubectlDir"
+                $script:KubectlInstalled = $true
+                $script:KubectlDir = $kubectlDir 
+
+                if (Get-Command kubectl -ErrorAction SilentlyContinue) {
+                    Write-ScriptOutput "kubectl is now available: $((kubectl version --client --short 2>$null) -join ' ')" -Level Success
+                } else {
+                    Write-ScriptOutput "kubectl download succeeded, but it's not in PATH. Please add $kubectlDir to your system PATH manually." -Level Warning
+                }
             } catch {
-                Write-ScriptOutput "Failed to auto-install kubectl: $_" -Level Warning
+                Write-ScriptOutput "Failed to auto-install kubectl: $_" -Level Error
+                Write-ScriptOutput "Please install kubectl manually from https://kubernetes.io/docs/tasks/tools/ and add it to your PATH." -Level Warning
             }
+        } else {
+            Write-ScriptOutput "Non-Windows OS detected. Please install kubectl manually." -Level Warning
         }
+    } else {
+        Write-ScriptOutput "kubectl is already available." -Level Info
     }
 }
-
 
 function Convert-K8sSizeToBytes {
      param([string]$Size)
@@ -1118,6 +1112,8 @@ function Process-EKSCluster {
     }
 
     $tmpKube = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "kubeconfig_${clusterName}_${([guid]::NewGuid())}.yaml")
+
+    Ensure-Kubectl
 
     $oldEnv = @{
         AWS_ACCESS_KEY_ID     = $env:AWS_ACCESS_KEY_ID
@@ -2704,7 +2700,9 @@ function ComprehensiveSummary {
             }else {
                 "$serviceName Summary"
             }
-            $dataSheets[$summarySheetName] = MultiAccountComprehensiveSummaryData -ServiceName $serviceName -ServiceList $serviceList
+            if ($serviceList -and $serviceList.Count -gt 0) {
+                $dataSheets[$summarySheetName] = MultiAccountComprehensiveSummaryData -ServiceName $serviceName -ServiceList $serviceList
+            }        
         }
 
         $detailSheets = @{
@@ -3072,6 +3070,18 @@ try {
 
     if ($SelectiveZipping -and $script:AllOutputFiles.Count -gt 1) {
         New-OutputArchive
+    }
+
+    if ($script:KubectlInstalled -and $script:KubectlDir) {
+        try {
+            $env:Path = ($env:Path -split ';' | Where-Object { $_ -ne $script:KubectlDir }) -join ';'
+            if (Test-Path $script:KubectlDir) {
+                Remove-Item $script:KubectlDir -Recurse -Force
+                Write-ScriptOutput "kubectl uninstalled successfully from $script:KubectlDir." -Level Info
+            }
+        } catch {
+            Write-ScriptOutput "Failed to uninstall kubectl: $_" -Level Warning
+        }
     }
 
     $executionTime = (Get-Date) - $script:startTime
