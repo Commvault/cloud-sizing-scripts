@@ -53,7 +53,7 @@ Method 2 — Run locally
    ```
 6. Run the script with desired parameters:
    ```powershell
-   ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-west-2"
+   ./CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "Profile1" -ProfileLocation "./Creds.txt" -Regions "us-east-1"
    ```
 
 Common script parameters
