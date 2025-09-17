@@ -1,4 +1,25 @@
 # AWS 
+
+## Requirements
+- **PowerShell 7**  
+  Download: https://github.com/PowerShell/PowerShell/releases  
+- **AWS CLI** (for local powershell runs)  
+  Install guide: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html  
+- **PowerShell Modules**  
+  - ImportExcel  
+  - AWS.Tools.Common  
+  - AWS.Tools.EC2  
+  - AWS.Tools.S3  
+  - AWS.Tools.SecurityToken  
+  - AWS.Tools.IdentityManagement  
+  - AWS.Tools.CloudWatch  
+  - AWS.Tools.RDS  
+  - AWS.Tools.DynamoDBv2  
+  - AWS.Tools.Redshift  
+  - AWS.Tools.FSx  
+  - AWS.Tools.ElasticFileSystem  
+  - AWS.Tools.EKS  
+  
 Execution Instructions
 ----------------------
 
@@ -10,18 +31,24 @@ Method 1 — Run in AWS CloudShell
    ```powershell
    pwsh
    ```
-3. (Install ImportExcel in CloudShell if Excel output is required)
+3. (Install ImportExcel in CloudShell)
    ```powershell
    Install-Module -Name ImportExcel -Scope CurrentUser -Force
    ```
-4. Upload `CVAWSCloudSizingScript.ps1` to CloudShell and run:
-   ```powershell
-   ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1"
-   ```
-5. (Optional) Make executable:
+   Note: AWS.Tools modules are pre-installed in CloudShell.
+4. (Optional) Make executable:
    ```bash
    chmod +x CVAWSCloudSizingScript.ps1
    ```
+5. Run using the default IAM role:
+   ```powershell
+   ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1"
+   ```
+6. Run using uploaded Creds.txt file with profiles:
+   ```powershell
+   ./CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "Profile1,Profile2" -ProfileLocation "./Creds.txt" -Regions "us-east-1,us-west-2"
+   ```
+
 
 Method 2 — Run locally
 1. Install PowerShell 7:
@@ -53,7 +80,7 @@ Method 2 — Run locally
    ```
 6. Run the script with desired parameters:
    ```powershell
-   ./CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "Profile1" -ProfileLocation "./Creds.txt" -Regions "us-east-1"
+   ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-west-2"
    ```
 
 Common script parameters
@@ -63,6 +90,25 @@ Common script parameters
 - -ProfileLocation "<path>" — shared Credentials file path.
 - -CrossAccountRoleName "<RoleName>" — role to assume in target accounts.
 - -Regions "us-east-1,us-west-2" — comma-separated regions to query.
+
+
+Credential Files:
+- Creds.txt (AWS shared credentials format)
+```ini
+[Profile1]
+aws_access_key_id = <AccessKey1>
+aws_secret_access_key = <SecretKey1>
+
+[Profile2]
+aws_access_key_id = <AccessKey2>
+aws_secret_access_key = <SecretKey2>
+
+- Accounts.txt (one AWS account ID per line, no commas):
+```ini
+123456789012
+987654321098
+555555555555
+
 
 Example invocations
 ```powershell
@@ -79,6 +125,7 @@ Example invocations
 ./CVAWSCloudSizingScript.ps1 -CrossAccountRoleName "InventoryRole" -UserSpecifiedAccounts "123456789012" -Regions "us-east-1"
 ```
 
+
 Outputs
 -------
 Files are written to the working directory with timestamps:
@@ -86,6 +133,7 @@ Files are written to the working directory with timestamps:
 - `comprehensive_all_aws_accounts_summary_YYYY-MM-DD_HHMMSS.xlsx` — consolidated workbook
 - `aws_sizing_script_output_YYYY-MM-DD_HHMMSS.log` — execution log
 - `aws_sizing_results_YYYY-MM-DD_HHMMSS.zip` — ZIP archive 
+
 
 **Required IAM Permissions**
 The executing user/role must have the following IAM permissions for the script to run successfully.
