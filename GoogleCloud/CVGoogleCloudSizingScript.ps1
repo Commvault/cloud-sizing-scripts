@@ -1740,8 +1740,20 @@ function Get-GcpBigQueryDatasets {
     $maxThreads = if (Get-Variable -Name MaxBigQueryTableThreads -Scope Script -ErrorAction SilentlyContinue) { [int]$script:MaxBigQueryTableThreads } else { 5 }
     if ($maxThreads -lt 1) { $maxThreads = 1 }
     if ($tableTotal -lt $maxThreads) { $maxThreads = $tableTotal }
-    $parallelEnabled = $false; try { $parallelEnabled = [bool]$script:EnableBigQueryParallelTables } catch {}
-    $useParallel = $parallelEnabled -and ($tableTotal -gt 0) -and ($maxThreads -gt 1)
+
+    # Determine if parallel table metadata retrieval is enabled.
+    # New default: ON (previously OFF unless EnableBigQueryParallelTables was explicitly set)
+    # Override precedence:
+    #   1. $script:DisableBigQueryParallelTables = $true  -> force OFF
+    #   2. $script:EnableBigQueryParallelTables  (legacy flag) respected if present
+    $parallelEnabled = $true
+    if (Get-Variable -Name EnableBigQueryParallelTables -Scope Script -ErrorAction SilentlyContinue) {
+        try { $parallelEnabled = [bool]$script:EnableBigQueryParallelTables } catch { $parallelEnabled = $true }
+    }
+    if (Get-Variable -Name DisableBigQueryParallelTables -Scope Script -ErrorAction SilentlyContinue) {
+        try { if ([bool]$script:DisableBigQueryParallelTables) { $parallelEnabled = $false } } catch {}
+    }
+    $useParallel = $parallelEnabled -and ($tableTotal -gt 0) -and ($maxThreads -gt 1) -and (-not $bulkSuccess)
     if ($useParallel) {
         Write-Log ("[DB][BigQuery] ({0}) Dataset={1} LightParallel Threads={2} Tables={3}" -f $ProjectId,$datasetId,$maxThreads,$tableTotal) -Level DEBUG
     } else {
