@@ -773,15 +773,14 @@ if __name__ == "__main__":
         elif arg.startswith("--workload="):
             workload = arg.split("=")[1]
         elif arg == "--help":
-            print("Usage: python oci_cs.py --workload=<instances|object_storage> [--profile=<profilename>] [--region=<region1>,<region2>] [--compartment=<comp1>,<comp2>] [--help]")
+            print("Usage: python oci_cs.py [--workload=<instances|object_storage|db_systems|oke_clusters>] [--profile=<profilename>] [--region=<region1>,<region2>] [--compartment=<comp1>,<comp2>] [--help]")
             sys.exit(0)
         else:
             print(f"Unknown argument: {arg}")
             sys.exit(1)
 
     if "workload" not in locals():
-        print("Error: --workload is required. Use --help for usage.")
-        sys.exit(1)
+        workload = "all"
     if "profile_name" not in locals():
         profile_name = oci.config.DEFAULT_PROFILE
     if "regions" not in locals():
@@ -817,6 +816,18 @@ if __name__ == "__main__":
     elif workload == "oke_clusters":
         init_excel(filename, workload)
         get_oke_cluster_info(config, filename, regions, compartments)
+    elif workload == "all":
+        logging.info(f"Getting information for all supported workloads.")
+        for wl in ["instances", "object_storage", "db_systems", "oke_clusters"]:
+            init_excel(filename, wl)
+            if wl == "instances":
+                get_instance_info(config, filename, regions, compartments)
+            elif wl == "object_storage":
+                get_object_storage_info(config, filename, regions, compartments)
+            elif wl == "db_systems":
+                get_database_info(config, filename, regions, compartments)
+            elif wl == "oke_clusters":
+                get_oke_cluster_info(config, filename, regions, compartments)
     else:
-        print(f"Workload '{workload}' is not supported yet. Supported workloads: instances, object_storage")
+        logging.error(f"Unsupported workload specified: {workload}. Supported workloads are: instances, object_storage, db_systems, oke_clusters. If you want to gather information for all workloads, use --workload=all or don't specify the --workload argument at all.")
         sys.exit(1)
