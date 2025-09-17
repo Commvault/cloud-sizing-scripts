@@ -102,13 +102,14 @@ aws_secret_access_key = <SecretKey1>
 [Profile2]
 aws_access_key_id = <AccessKey2>
 aws_secret_access_key = <SecretKey2>
+```
 
 - Accounts.txt (one AWS account ID per line, no commas):
 ```ini
 123456789012
 987654321098
 555555555555
-
+```
 
 Example invocations
 ```powershell
