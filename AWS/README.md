@@ -136,7 +136,8 @@ Files are written to the working directory with timestamps:
 - `aws_sizing_results_YYYY-MM-DD_HHMMSS.zip` — ZIP archive 
 
 
-**Required IAM Permissions**
+Required IAM Permissions
+-------
 The executing user/role must have the following IAM permissions for the script to run successfully.
 
 ```json
@@ -182,3 +183,36 @@ The executing user/role must have the following IAM permissions for the script t
         }
     ]
 }
+```
+**Important: EKS (Kubernetes Workload)**
+- To collect in-cluster workload details (such as PVCs, Nodes), the executing IAM User/Role must be added to the EKS cluster’s `aws-auth` ConfigMap with appropriate Kubernetes Role-Based Access Control permissions. Otherwise, only basic cluster metadata will be available.
+
+Example `aws-auth` ConfigMap
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-auth
+  namespace: kube-system
+data:
+  mapUsers: '[{
+      "userarn": "arn:aws:iam::123456789012:user/ScriptUser1",
+      "username": "scriptuser1",
+      "groups": ["system:masters"]
+    },
+    {
+      "userarn": "arn:aws:iam::123456789012:user/ScriptUser2",
+      "username": "scriptuser2",
+      "groups": ["system:masters"]
+    }]'
+  mapRoles: |
+    - rolearn: arn:aws:iam::123456789012:role/ScriptUserRole
+      username: system:node:{{EC2PrivateDNSName}}
+      groups:
+        - system:bootstrappers
+        - system:nodes
+```        
+- mapUsers — Maps IAM users to Kubernetes groups.
+- mapRoles — Maps IAM roles (e.g., node instance roles) to Kubernetes groups.
+- system:masters — Grants full cluster-admin permissions.
+
