@@ -1163,7 +1163,6 @@ function Process-EKSCluster {
             Region          = $Region
             ClusterName     = $clusterName
             KubernetesVersion = $kubernetesVersion
-            Count           = 1
             PVCCount        = $pvcCount
             NodeCount       = $nodeCount
             SizeGiB         = $sizeGiB
