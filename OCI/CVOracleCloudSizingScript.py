@@ -8,6 +8,12 @@ from openpyxl.styles import Font, PatternFill
 import os
 from datetime import datetime
 import logging
+import tempfile
+import json
+import shutil
+
+oci_path = shutil.which("oci")
+kubectl_path = shutil.which("kubectl")
 
 total_instances = 0
 total_instance_sizeGB = 0
@@ -19,6 +25,11 @@ total_storageTB = 0
 total_db_systems = 0
 total_db_system_sizeGB = 0
 total_db_system_sizeTB = 0
+total_oke_clusters = 0
+total_oke_node_count = 0
+total_oke_pvc_count = 0
+total_oke_pvc_size_gb = 0
+total_oke_pvc_size_tb = 0
 
 class InstanceInfo:
     def __init__(self):
@@ -89,6 +100,29 @@ class DBSystemSummary:
         self.total_storage_gb = 0
         self.total_storage_tb = 0
 
+class OKEClusterInfo:
+    def __init__(self):
+        self.region = None
+        self.cluster_id = None
+        self.cluster_name = None
+        self.kubernetes_version = None
+        self.node_count = 0
+        self.node_names = []
+        self.pvc_count = 0
+        self.pvc_names = []
+        self.total_pvc_size_gb = 0
+        self.total_pvc_size_tb = 0
+
+class OKEClusterSummary:
+    def __init__(self):
+        self.region = None
+        self.cluster_count = 0
+        self.total_node_count = 0
+        self.total_pvc_count = 0
+        self.total_pvc_size_gb = 0
+        self.total_pvc_size_tb = 0
+
+
 def install_and_import(package):
     try:
         __import__(package)
@@ -126,6 +160,18 @@ def get_sheet_info(workload):
             "Defined Tags", "Freeform Tags"
         ]
         summary_headers = ["Region", "DB System Count", "Total Storage (GB)", "Total Storage (TB)"]
+    elif workload == "oke_clusters":
+        info_sheet = "OKE Cluster Info"
+        summary_sheet = "OKE Cluster Summary"
+        info_headers = [
+            "Region", "Cluster ID", "Cluster Name", "Kubernetes Version",
+            "Node Count", "PVC Count", "Total PVC Size (GB)", "Total PVC Size (TB)",
+            "PVC Names",  "Node Names"
+        ]
+        summary_headers = [
+            "Region", "Cluster Count", "Total Node Count",
+            "Total PVC Count", "Total PVC Size (GB)", "Total PVC Size (TB)"
+        ]
     else:
         raise ValueError(f"Unsupported workload: {workload}")
 
@@ -176,7 +222,6 @@ def dump_info(filename, workload, object_list: list):
     sheet = wb[info_sheet]
 
     for obj in object_list:
-        # For now, assuming instances workload — extend this when you add object_storage
         if workload == "instances":
             row = [
                 obj.compartment_id,
@@ -224,6 +269,19 @@ def dump_info(filename, workload, object_list: list):
                 str(obj.defined_tags),
                 str(obj.freeform_tags),
             ]
+        elif workload == "oke_clusters":
+            row = [
+                obj.region,
+                obj.cluster_id,
+                obj.cluster_name,
+                obj.kubernetes_version,
+                obj.node_count,
+                obj.pvc_count,
+                obj.total_pvc_size_gb,
+                obj.total_pvc_size_tb,
+                ", ".join(obj.pvc_names) if obj.pvc_names else "",
+                ", ".join(obj.node_names) if obj.node_names else "",
+            ]
         else:
             raise ValueError(f"Unsupported workload: {workload}")
         sheet.append(row)
@@ -256,6 +314,15 @@ def dump_summary(filename, workload, summary):
                 obj.total_storage_gb,
                 obj.total_storage_tb,
             ]
+        elif workload == "oke_clusters":
+            row = [
+                obj.region,
+                obj.cluster_count,
+                obj.total_node_count,
+                obj.total_pvc_count,
+                obj.total_pvc_size_gb,
+                obj.total_pvc_size_tb
+            ]
         else:
             raise ValueError(f"Unsupported workload: {workload}")
         sheet.append(row)
@@ -278,6 +345,18 @@ def write_grand_total(filename, workload):
         sheet_name = "DB System Summary"
         global total_db_systems, total_db_system_sizeGB, total_db_system_sizeTB
         row = ["Total DB Systems", total_db_systems, total_db_system_sizeGB, total_db_system_sizeTB]
+    elif workload == "oke_clusters":
+        sheet_name = "OKE Cluster Summary"
+        global total_oke_clusters, total_oke_node_count, total_oke_pvc_count
+        global total_oke_pvc_size_gb, total_oke_pvc_size_tb
+        row = [
+            "Total OKE Clusters",
+            total_oke_clusters,
+            total_oke_node_count,
+            total_oke_pvc_count,
+            total_oke_pvc_size_gb,
+            total_oke_pvc_size_tb
+        ]
     else:
         raise ValueError(f"Unsupported workload: {workload}")
 
@@ -291,7 +370,6 @@ def get_object_storage_info(config, filename, regions=[], compartments=[]):
     global total_buckets, total_storageGB, total_storageTB
     object_storage_summary_list = []
     identity_client = oci.identity.IdentityClient(config)
-    # Get subscribed regions if regions list is empty
     if not regions:
         regions = [region.region_name for region in identity_client.list_region_subscriptions(config["tenancy"]).data]
     if not compartments:
@@ -416,7 +494,6 @@ def get_instance_info(config, filename, regions=[], compartments=[]):
     global total_instances, total_instance_sizeGB, total_instance_sizeTB
     instance_summary_list = []
     identity_client = oci.identity.IdentityClient(config)
-    # Get subscribed regions if regions list is empty
     if not regions: 
         regions = [region.region_name for region in identity_client.list_region_subscriptions(config["tenancy"]).data]
     if not compartments:
@@ -537,7 +614,148 @@ def get_database_info(config, filename, regions=[], compartments=[]):
     logging.info("Completed processing all regions and compartments for DB systems.")
     logging.info(f"Grand Total - DB Systems: {total_db_systems}, Storage (GB): {total_db_system_sizeGB}, Storage (TB): {total_db_system_sizeTB}")
 
+def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
+    global total_oke_clusters, total_oke_node_count, total_oke_pvc_count
+    global total_oke_pvc_size_gb, total_oke_pvc_size_tb
+
+    oke_summary_list = []
+    identity_client = oci.identity.IdentityClient(config)
+
+    if not regions:
+        regions = [r.region_name for r in identity_client.list_region_subscriptions(config["tenancy"]).data]
+    if not compartments:
+        compartments = [c.id for c in identity_client.list_compartments(
+            compartment_id=config["tenancy"], compartment_id_in_subtree=True).data]
+
+    for region in regions:
+        logging.info(f"Processing OKEs in region: {region}")
+        config["region"] = region
+        container_engine_client = oci.container_engine.ContainerEngineClient(config)
+
+        region_summary = OKEClusterSummary()
+        region_summary.region = region
+
+        for compartment in compartments:
+            try:
+                clusters = oci.pagination.list_call_get_all_results(
+                    container_engine_client.list_clusters,
+                    compartment_id=compartment
+                ).data
+            except Exception as e:
+                logging.error(f"Error fetching clusters in {compartment}: {e}")
+                continue
+
+            compartment_oke_list = []
+            for cluster in clusters:
+                if cluster.lifecycle_state == "DELETED":
+                    continue
+
+                cluster_info = OKEClusterInfo()
+                cluster_info.region = region
+                cluster_info.cluster_id = cluster.id
+                cluster_info.cluster_name = cluster.name
+                cluster_info.kubernetes_version = cluster.kubernetes_version
+
+                kubeconfig_file = os.path.join(tempfile.gettempdir(), f"kubeconfig_{cluster.id}")
+                try:
+                    subprocess.run(
+                        [
+                            "oci", "ce", "cluster", "create-kubeconfig",
+                            "--cluster-id", cluster.id,
+                            "--file", kubeconfig_file,
+                            "--region", region,
+                            "--token-version", "2.0.0",
+                            "--kube-endpoint", "PRIVATE_ENDPOINT",
+                            "--profile", config.get("profile", oci.config.DEFAULT_PROFILE)
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True
+                    )
+
+                    logging.info(f"Kubeconfig created at {kubeconfig_file} for cluster {cluster.name}")
+
+                    result = subprocess.run(
+                        ["kubectl", "--kubeconfig", kubeconfig_file, "get", "pvc", "-A", "-o", "json"],
+                        check=True,
+                        capture_output=True,
+                        text=True
+                    )
+
+                    pvc_data = json.loads(result.stdout)
+                    cluster_info.pvc_count = len([pvc for pvc in pvc_data["items"] if pvc.get("metadata", {}).get("name")])
+                    cluster_info.pvc_names = [
+                        f"{pvc['metadata'].get('namespace','default')}/{pvc['metadata']['name']}"
+                        for pvc in pvc_data["items"]
+                    ]
+                    cluster_info.total_pvc_size_gb = sum([
+                        int(pvc["spec"]["resources"]["requests"]["storage"].replace("Gi", ""))
+                        for pvc in pvc_data["items"]
+                        if "resources" in pvc["spec"] and "storage" in pvc["spec"]["resources"]["requests"]
+                    ])
+                    cluster_info.total_pvc_size_tb = round(cluster_info.total_pvc_size_gb / 1024, 2)
+
+                    try:
+                        node_result = subprocess.run(
+                            ["kubectl", "--kubeconfig", kubeconfig_file, "get", "nodes", "-o", "json"],
+                            check=True,
+                            capture_output=True,
+                            text=True
+                        )
+                        node_data = json.loads(node_result.stdout)
+                        cluster_info.node_names = [n["metadata"]["name"] for n in node_data["items"]]
+                        cluster_info.node_count = len(cluster_info.node_names)
+                    except Exception as e:
+                        logging.warning(f"Could not fetch nodes for {cluster.name}: {e}")
+                        cluster_info.node_names = []
+                        cluster_info.node_count = 0
+
+                except Exception as e:
+                    logging.warning(f"Error while using kubectl to fetch nodes and pvcs for {cluster.name}: {e}")
+                finally:
+                    try:
+                        os.remove(kubeconfig_file)
+                    except OSError:
+                        pass
+
+
+                region_summary.cluster_count += 1
+                region_summary.total_node_count += cluster_info.node_count
+                region_summary.total_pvc_count += cluster_info.pvc_count
+                region_summary.total_pvc_size_gb += cluster_info.total_pvc_size_gb
+                region_summary.total_pvc_size_tb += cluster_info.total_pvc_size_tb
+
+                total_oke_clusters += 1
+                total_oke_node_count += cluster_info.node_count
+                total_oke_pvc_count += cluster_info.pvc_count
+                total_oke_pvc_size_gb += cluster_info.total_pvc_size_gb
+                total_oke_pvc_size_tb += cluster_info.total_pvc_size_tb
+
+                compartment_oke_list.append(cluster_info)
+
+            dump_info(filename, "oke_clusters", compartment_oke_list)
+
+        oke_summary_list.append(region_summary)
+
+    write_grand_total(filename, "oke_clusters")
+    dump_summary(filename, "oke_clusters", oke_summary_list)
+    format_workbook(filename)
+    logging.info("Completed processing OKE clusters.")
+    logging.info(
+        f"Grand Total - OKE Clusters: {total_oke_clusters}, "
+        f"Nodes: {total_oke_node_count}, PVCs: {total_oke_pvc_count}, "
+        f"PVC Size (GB): {total_oke_pvc_size_gb}, PVC Size (TB): {total_oke_pvc_size_tb}"
+    )
+
+
 if __name__ == "__main__":
+
+    if not shutil.which("kubectl"):
+        logging.error("Error: 'kubectl' command not found. Please install kubectl to proceed.")
+        sys.exit(1)
+    if not shutil.which("oci"):
+        logging.error("Error: 'oci' CLI not found. Please install OCI CLI to proceed.")
+        sys.exit(1)
 
     packages = ["oci", "openpyxl", "pandas"]
 
@@ -555,15 +773,14 @@ if __name__ == "__main__":
         elif arg.startswith("--workload="):
             workload = arg.split("=")[1]
         elif arg == "--help":
-            print("Usage: python oci_cs.py --workload=<instances|object_storage> [--profile=<profilename>] [--region=<region1>,<region2>] [--compartment=<comp1>,<comp2>] [--help]")
+            print("Usage: python oci_cs.py [--workload=<instances|object_storage|db_systems|oke_clusters>] [--profile=<profilename>] [--region=<region1>,<region2>] [--compartment=<comp1>,<comp2>] [--help]")
             sys.exit(0)
         else:
             print(f"Unknown argument: {arg}")
             sys.exit(1)
 
     if "workload" not in locals():
-        print("Error: --workload is required. Use --help for usage.")
-        sys.exit(1)
+        workload = "all"
     if "profile_name" not in locals():
         profile_name = oci.config.DEFAULT_PROFILE
     if "regions" not in locals():
@@ -596,6 +813,21 @@ if __name__ == "__main__":
     elif workload == "db_systems":
         init_excel(filename,workload)
         get_database_info(config, filename, regions, compartments)
+    elif workload == "oke_clusters":
+        init_excel(filename, workload)
+        get_oke_cluster_info(config, filename, regions, compartments)
+    elif workload == "all":
+        logging.info(f"Getting information for all supported workloads.")
+        for wl in ["instances", "object_storage", "db_systems", "oke_clusters"]:
+            init_excel(filename, wl)
+            if wl == "instances":
+                get_instance_info(config, filename, regions, compartments)
+            elif wl == "object_storage":
+                get_object_storage_info(config, filename, regions, compartments)
+            elif wl == "db_systems":
+                get_database_info(config, filename, regions, compartments)
+            elif wl == "oke_clusters":
+                get_oke_cluster_info(config, filename, regions, compartments)
     else:
-        print(f"Workload '{workload}' is not supported yet. Supported workloads: instances, object_storage")
+        logging.error(f"Unsupported workload specified: {workload}. Supported workloads are: instances, object_storage, db_systems, oke_clusters. If you want to gather information for all workloads, use --workload=all or don't specify the --workload argument at all.")
         sys.exit(1)
