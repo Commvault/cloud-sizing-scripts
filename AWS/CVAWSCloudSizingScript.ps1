@@ -1,5 +1,4 @@
 #requires -Version 7.0
-#requires -Modules ImportExcel, AWS.Tools.Common, AWS.Tools.EC2, AWS.Tools.S3, AWS.Tools.SecurityToken, AWS.Tools.IdentityManagement, AWS.Tools.CloudWatch, AWS.Tools.RDS, AWS.Tools.FSx, AWS.Tools.ElasticFileSystem, AWS.Tools.DynamoDBv2, AWS.Tools.Redshift, AWS.Tools.EKS
 
 <#
 .SYNOPSIS
@@ -54,19 +53,6 @@
 .PARAMETER ExternalId
     External ID required for cross-account role assumption (Optional).
 
-.EXAMPLES
-    # Run from Laptop with access/secret key creds file
-    .\CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "Profile1,Profile2" -ProfileLocation './Creds.txt' -Regions "us-west-1"
-
-    # Run from CloudShell with IAM role (default profile)
-    ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-west-1"
-
-    # Run from CloudShell using uploaded creds file
-    ./CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "Profile1" -ProfileLocation './Creds.txt' -Regions "us-east-1"
-
-    # Run cross-account role from AWS environment (CloudShell/EC2)
-    .\CVAWSCloudSizingScript.ps1 -CrossAccountRoleName "InventoryRole" -UserSpecifiedAccountsFile "./Accounts.txt" -Regions "us-east-1,us-west-2"
-
 .OUTPUTS
     Creates a timestamped output directory with the following files:
 
@@ -83,83 +69,6 @@
 
     - aws_sizing_results_YYYY-MM-DD_HHMMSS.zip
         – ZIP archive containing all per-account summary files, the comprehensive report, and the log
-
-.NOTES
-    Requirements:
-    - PowerShell 7
-    - ImportExcel module
-    - AWS.Tools.* modules (for local execution)
-
-    SETUP INSTRUCTIONS FOR AWS CLOUDSHELL:
-    --------------------------------------
-    1. ImportExcel module must be installed (AWS.Tools.* are pre-installed):
-       pwsh
-       Install-Module -Name ImportExcel -Force
-
-    2. Authentication options:
-       • Default IAM role (use -DefaultProfile, no creds needed)
-       • Upload Creds.txt file and run with -UserSpecifiedProfileNames/-ProfileLocation
-    
-    3. Upload the Creds.txt file to CloudShell:
-       • Use the CloudShell upload button and upload the Creds.txt file to your CloudShell home directory.
-
-    4. Run the script from CloudShell:
-        • Using default IAM role:
-            pwsh
-            ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1"
-
-        • Using uploaded Creds.txt file with specific profiles:
-            pwsh
-            ./CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "Profile1,Profile2" -ProfileLocation "./Creds.txt" -Regions "us-east-1,us-west-2"
-
-        SETUP INSTRUCTIONS FOR LOCAL SYSTEM (Laptop/Desktop):
-    -----------------------------------------------------
-    1. Install PowerShell 7:
-        https://github.com/PowerShell/PowerShell/releases
-
-    2. Install AWS CLI:
-        https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
-
-    3. Install required PowerShell modules:
-        # Remove any loaded AWS.Tools modules first (optional)
-        Get-Module AWS.Tools.* | Remove-Module -Force
-
-        # Install ImportExcel and AWS.Tools installer, then required AWS modules
-        Install-Module -Name ImportExcel -Scope CurrentUser -Force -Confirm:$false
-        Install-Module -Name AWS.Tools.Installer -Scope CurrentUser -Force -Confirm:$false
-        Install-AWSToolsModule -Name AWS.Tools.Common,AWS.Tools.EC2,AWS.Tools.S3,AWS.Tools.SecurityToken,AWS.Tools.IdentityManagement,AWS.Tools.CloudWatch,AWS.Tools.RDS,AWS.Tools.DynamoDBv2,AWS.Tools.Redshift,AWS.Tools.FSx,AWS.Tools.ElasticFileSystem,AWS.Tools.EKS -Scope CurrentUser -CleanUp -Force -Confirm:$false
-
-    4. Verify required modules are installed:
-        Get-Module -ListAvailable AWS.Tools.* , ImportExcel | Select-Object Name, Version, Path
-
-    5. Fix unsigned script error (if needed):
-        If you see:
-            .\CVAWSCloudSizingScript.ps1 cannot be loaded because it is not digitally signed
-        Then temporarily allow scripts to run in this session:
-            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-
-    6. Authentication:
-        • Preferred: Creds.txt file (AWS access/secret keys) with profiles
-        • Or: Use -ProfileLocation parameter to specify the creds file path
-
-    7. Run the script with desired parameters:
-        ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-west-2"
-
-    Credential Files:
-    -----------------
-    - Creds.txt (AWS shared credentials format):
-        [Profile1]
-        aws_access_key_id = <AccessKey1>
-        aws_secret_access_key = <SecretKey1>
-
-        [Profile2]
-        aws_access_key_id = <AccessKey2>
-        aws_secret_access_key = <SecretKey2>
-
-    - Accounts.txt (one AWS account ID per line, no commas):
-        123456789012
-        987654321098
-        555555555555
 #>
 
 
@@ -1254,7 +1163,6 @@ function Process-EKSCluster {
             Region          = $Region
             ClusterName     = $clusterName
             KubernetesVersion = $kubernetesVersion
-            Count           = 1
             PVCCount        = $pvcCount
             NodeCount       = $nodeCount
             SizeGiB         = $sizeGiB
@@ -3027,6 +2935,34 @@ try {
     Write-ScriptOutput "Log file: $script:LogFile" -Level Info
     Write-ScriptOutput "Script supports the following services: $($script:ServiceRegistry.Keys -join ', ')" -Level Info
 
+    $requiredModules = @(
+    'ImportExcel',
+    'AWS.Tools.Common',
+    'AWS.Tools.EC2',
+    'AWS.Tools.S3',
+    'AWS.Tools.SecurityToken',
+    'AWS.Tools.IdentityManagement',
+    'AWS.Tools.CloudWatch',
+    'AWS.Tools.RDS',
+    'AWS.Tools.DynamoDBv2',
+    'AWS.Tools.Redshift',
+    'AWS.Tools.FSx',
+    'AWS.Tools.ElasticFileSystem',
+    'AWS.Tools.EKS'
+    )
+
+    $missingModules = @()
+    foreach ($module in $requiredModules) {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+            $missingModules += $module
+        }
+    }
+
+    if ($missingModules.Count -gt 0) {
+        Write-ScriptOutput "Necessary modules not present. Missing modules: $($missingModules -join ', ')" -Level Error
+        exit 1
+    }
+
     if ($ProfileLocation) {
         Write-ScriptOutput "ProfileLocation parameter provided: $ProfileLocation" -Level Info
         if (Test-Path $ProfileLocation) {
@@ -3044,13 +2980,6 @@ try {
         Write-ScriptOutput "Parsed profiles: $($profileList -join ', ')" -Level Info
     }
 
-    $requiredModules = @('AWS.Tools.Common', 'ImportExcel')
-    foreach ($module in $requiredModules) {
-        if (-not (Get-Module -ListAvailable -Name $module)) {
-            Write-ScriptOutput "Required module '$module' not found. Please install it." -Level Error
-            exit 1
-        }
-    }
     Invoke-AuthenticationScenarios
 
     Write-ScriptOutput "=== Processing Summary ===" -Level Success
