@@ -111,7 +111,7 @@ The script creates a timestamped output directory with the following files:
 - `azure_vm_info_YYYY-MM-DD_HHMMSS.csv` - VM inventory with disk sizing
 - `azure_storage_accounts_info_YYYY-MM-DD_HHMMSS.csv` - Storage Account inventory with capacity metrics
 - `azure_file_shares_info_YYYY-MM-DD_HHMMSS.csv` - File Share inventory with capacity metrics
-- `azure_netapp_volumes_info_YYYY-MM-DD_HHMMSS.csv` - NetApp Files volume inventory with capacity metrics
+- `azure_netapp_volumes_info_YYYY-MM-DD_HHMMSS.csv` - NetApp volumes inventory with capacity metrics
 - `azure_sql_managed_instances_YYYY-MM-DD_HHMMSS.csv` - SQL Managed Instances inventory
 - `azure_sql_databases_inventory_YYYY-MM-DD_HHMMSS.csv` - SQL Databases inventory
 - `azure_mysql_servers_YYYY-MM-DD_HHMMSS.csv` - MySQL Servers inventory
@@ -129,5 +129,3 @@ The script automatically creates a ZIP archive of all results. In Azure Cloud Sh
 #### Performance Notes
 - Azure Monitor metrics are collected using Maximum aggregation over a 1-hour time period for efficient data retrieval
 - AKS persistent volume data is collected directly from cluster APIs using kubectl
-- All progress tracking includes hierarchical progress bars for better visibility into long-running operations
-- The script handles large environments gracefully with proper error handling and retry

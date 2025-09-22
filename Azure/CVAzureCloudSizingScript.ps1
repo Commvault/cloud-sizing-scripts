@@ -667,6 +667,7 @@ foreach ($sub in $subs) {
     # VMs  
     if ($Selected.VM) {  
         try {
+            Write-Host "Processing Virtual Machines in subscription $($sub.Name)" -ForegroundColor Green
             $vmList = Get-AzVM
             if ($vmList) {
                 $vmCount = 0
@@ -748,6 +749,7 @@ foreach ($sub in $subs) {
                 
                 # Process Storage Account metrics if selected
                 if ($Selected.STORAGE) {
+                    Write-Host "Processing Storage Accounts in subscription $($sub.Name)" -ForegroundColor Green
                     $saCount = 0
                     foreach ($sa in $accounts) {  
                         $saCount++
@@ -801,6 +803,7 @@ foreach ($sub in $subs) {
                 
                 # Process File Shares if selected (separate progress tracking)
                 if ($Selected.FILESHARE) {
+                    Write-Host "Processing File Shares in subscription $($sub.Name)" -ForegroundColor Green
                     $fileShareCount = 0
                     foreach ($sa in $accounts) {  
                         $fileShareCount++
@@ -874,6 +877,7 @@ foreach ($sub in $subs) {
     # NetApp Files
     if ($Selected.NETAPP) {
         try {
+            Write-Host "Processing NetApp Volumes in subscription $($sub.Name)" -ForegroundColor Green
             # Time window for metric lookup
             $startTime = (Get-Date).AddHours(-1)
             $endTime = Get-Date
@@ -905,7 +909,7 @@ foreach ($sub in $subs) {
                 foreach ($account in $anfAccounts) {
                     $anfCount++
                     $anfPercentComplete = [math]::Round(($anfCount / $totalAnfAccounts) * 100, 1)
-                    Write-Progress -Id 6 -ParentId 1 -Activity "Processing NetApp Files" -Status "Processing NetApp Account $anfCount of $totalAnfAccounts - $anfPercentComplete% complete" -PercentComplete $anfPercentComplete
+                    Write-Progress -Id 6 -ParentId 1 -Activity "Processing NetApp Volumes" -Status "Processing NetApp Account $anfCount of $totalAnfAccounts - $anfPercentComplete% complete" -PercentComplete $anfPercentComplete
         
                     try {
                         try {
@@ -988,7 +992,7 @@ foreach ($sub in $subs) {
                         Write-Warning "Error getting NetApp pools/volumes for account $($account.Name): $($_.Exception.Message)"
                     }
                 }
-                Write-Progress -Id 6 -Activity "Processing NetApp Files" -Completed
+                Write-Progress -Id 6 -Activity "Processing NetApp Volumes" -Completed
             } else {
                 Write-Host "No NetApp Files accounts found in subscription $($sub.Name)" -ForegroundColor Yellow
             }
@@ -1278,6 +1282,8 @@ foreach ($sub in $subs) {
                 Write-Warning "Unable to collect MySQL information from subscription: $($sub.Name). Error: $($_.Exception.Message)"
             }
             
+            Write-Progress -Id 10 -Activity "Discovering MySQL Servers" -Status "Discovery Complete" -PercentComplete 100
+            Start-Sleep -Milliseconds 100  # Brief pause to ensure progress bar displays properly
             Write-Progress -Id 10 -Activity "Discovering MySQL Servers" -Completed
             
             if ($allMySQLServers -and $allMySQLServers.Count -gt 0) {
@@ -1436,6 +1442,8 @@ foreach ($sub in $subs) {
                 Write-Warning "Unable to collect PostgreSQL information from subscription: $($sub.Name). Error: $($_.Exception.Message)"
             }
             
+            Write-Progress -Id 12 -Activity "Discovering PostgreSQL Servers" -Status "Discovery Complete" -PercentComplete 100
+            Start-Sleep -Milliseconds 100  # Brief pause to ensure progress bar displays properly
             Write-Progress -Id 12 -Activity "Discovering PostgreSQL Servers" -Completed
             
             if ($allPostgreSQLServers -and $allPostgreSQLServers.Count -gt 0) {
