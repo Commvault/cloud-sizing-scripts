@@ -90,6 +90,7 @@ Common script parameters
 - -ProfileLocation "<path>" — shared Credentials file path.
 - -CrossAccountRoleName "<RoleName>" — role to assume in target accounts.
 - -Regions "us-east-1,us-west-2" — comma-separated regions to query.
+- -Partition "GovCloud" — Specifies the AWS partition. Use "GovCloud" for AWS GovCloud regions.
 
 
 Credential Files:
@@ -124,6 +125,9 @@ Example invocations
 
 # Cross-account role using file with account IDs [CloudShell]
 ./CVAWSCloudSizingScript.ps1 -CrossAccountRoleName "InventoryRole" -UserSpecifiedAccounts "123456789012" -Regions "us-east-1"
+
+# Cross-account role in AWS GovCloud
+./CVAWSCloudSizingScript.ps1 -CrossAccountRoleName "InventoryRole" -UserSpecifiedAccounts "123456789012" -Regions "us-gov-west-1" -Partition "GovCloud"
 ```
 
 
