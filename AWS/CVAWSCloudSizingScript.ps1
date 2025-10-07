@@ -12,6 +12,7 @@
       - FSx file systems (ONTAP/SVX, Windows, Lustre, etc.)
       - RDS database instances
       - DynamoDB tables
+      - DocumentDB clusters
       - Redshift clusters
       - EKS Clusters and PVCs associated with the cluster
     Supports multiple authentication methods including:
@@ -228,6 +229,18 @@ EKS = @{
         RequiresTagProcessing = $true
         SpecialHandling = $true
     }
+    DocumentDB = @{
+        DisplayName = "Clusters"
+        GetCommand = "Get-DOCDBCluster"
+        CandidateGetCommands = @("Get-DOCDBCluster","Get-DOCCluster","Get-DocumentDBCluster")
+        PropertyPath = $null
+        SizeProperty = "Custom"
+        IdProperty = "DBClusterIdentifier"
+        StorageType = "Document"
+        ProcessorFunction = "Process-DocumentDBCluster"
+        RequiresTagProcessing = $true
+        SpecialHandling = $true
+    }
 }
 
 $script:Config = @{
@@ -263,6 +276,7 @@ $baseOutputRDS = "aws_rds_info"
 $baseOutputDynamoDB = "aws_dynamodb_info"
 $baseOutputRedshift = "aws_redshift_info"
 $baseOutputEKS = "aws_eks_info"
+$baseOutputDocumentDB = "aws_documentdb_info"
 $archiveFile = "aws_sizing_results_$date_string.zip"
 
 function Show-ScriptProgress {
@@ -301,31 +315,43 @@ function Get-SafeCWMetricStatistic {
     if (-not $EndTime)   { $EndTime = if ($script:utcEndTime) { [datetime]$script:utcEndTime } else { (Get-Date).ToUniversalTime() } }
     if (-not $StartTime) { $StartTime = if ($script:utcStartTime) { [datetime]$script:utcStartTime } else { $EndTime.AddDays(-7) } }
 
-    $utcStart = $StartTime.ToUniversalTime()
-    $utcEnd   = $EndTime.ToUniversalTime()
-
     if ($Dimensions -and -not ($Dimensions -is [System.Collections.IEnumerable] -and -not ($Dimensions -is [string]))) {
         $Dimensions = @($Dimensions)
     }
 
+    $cmdParams = (Get-Command Get-CWMetricStatistic).Parameters.Keys
+    $hasUtcParams = $cmdParams -contains 'UtcEndTime'
+
+    # Build parameters based on environment(AWS CloudShell vs Local PowerShell)
     $cwParams = @{
         Namespace      = $Namespace
         MetricName     = $MetricName
-        Dimension      = $Dimensions
-        StartTime      = $StartTime
-        EndTime        = $EndTime
-        UtcStartTime   = $utcStart
-        UtcEndTime     = $utcEnd
         Period         = $Period
-        Statistic      = $Statistics
-        Credential     = $Credential
-        Region         = $Region
         ErrorAction    = 'SilentlyContinue'
         WarningAction  = 'SilentlyContinue'
-
     }
 
+    if ($hasUtcParams) {
+        # CloudShell - use ONLY Utc parameters
+        $cwParams['UtcStartTime'] = $StartTime.ToUniversalTime()
+        $cwParams['UtcEndTime'] = $EndTime.ToUniversalTime()
+    } else {
+        # Local PowerShell - use ONLY regular parameters  
+        $cwParams['StartTime'] = $StartTime
+        $cwParams['EndTime'] = $EndTime
+    }
+
+    if ($Dimensions) { $cwParams['Dimension'] = $Dimensions }
+    if ($Statistics) { $cwParams['Statistic'] = $Statistics }
+    if ($Credential) { $cwParams['Credential'] = $Credential }
+    if ($Region) { $cwParams['Region'] = $Region }
+
+    try {
     return Get-CWMetricStatistic @cwParams
+    } catch {
+        Write-ScriptOutput "CloudWatch query failed - Namespace: $Namespace, Metric: $MetricName - $($_.Exception.Message)" -Level Warning
+        return $null
+    }
 }
 
 function Write-ScriptOutput {
@@ -482,7 +508,15 @@ function Invoke-ServiceInventory {
             $processedItem = & $serviceConfig.ProcessorFunction -Item $item -Credential $Credential -Region $Region -AccountInfo $AccountInfo -AccountAlias $AccountAlias
 
             if ($processedItem) {
-                $serviceList.Add($processedItem) | Out-Null
+                if ($processedItem -is [Array]) {
+                    foreach ($singleItem in $processedItem) {
+                        if ($singleItem) {
+                            [void]$serviceList.Add($singleItem)
+                        }
+                    }
+                } else {
+                    [void]$serviceList.Add($processedItem)
+                }
             }
             $count++
         }
@@ -599,6 +633,17 @@ function Process-S3Bucket {
             }
         }
 
+        $objectCount = 0
+        try {
+            $objectMetric = Get-SafeCWMetricStatistic -Namespace 'AWS/S3' -MetricName 'NumberOfObjects' -Dimensions @(@{Name='BucketName';Value=$bucketName}, @{Name='StorageType';Value='AllStorageTypes'}) -Period 86400 -Statistics 'Average' -StartTime $script:utcStartTime -EndTime $script:utcEndTime -Credential $Credential -Region $actualRegion
+            
+            if ($objectMetric -and $objectMetric.Datapoints) {
+                $objectCount = [math]::Round(($objectMetric.Datapoints | Sort-Object Timestamp -Descending | Select-Object -First 1).Average, 0)
+                Write-ScriptOutput "S3 object count via CloudWatch for ${bucketName}: $objectCount objects" -Level Info
+            }
+        } catch {
+            Write-ScriptOutput "Warning: failed to get object count for bucket ${bucketName}: $_" -Level Warning
+        }
 
         if ($totalBytes -eq 0) {    try {
                 $val = Get-S3BucketSize -BucketName $bucketName -Credential $Credential -Region $actualRegion
@@ -652,6 +697,7 @@ function Process-S3Bucket {
             AwsAccountAlias = $AccountAlias
             Region = $actualRegion
             BucketName = $bucketName
+            ObjectCount = $objectCount
             CreationDate = if ($Item.CreationDate) { $Item.CreationDate } else { $null }
             SizeGiB = $sizes.SizeGiB
             SizeTiB = $sizes.SizeTiB
@@ -1325,6 +1371,99 @@ function Process-RDSInstance {
     }
 }
 
+function Process-DocumentDBCluster {
+    param($Item, $Credential, $Region, $AccountInfo, $AccountAlias)
+    try {
+        $clusterId = $Item.DBClusterIdentifier
+        $engine = if ($Item.Engine) { $Item.Engine } else { "docdb" }
+        $engineVersion = if ($Item.EngineVersion) { $Item.EngineVersion } else { "Unknown" }
+        $clusterStatus = if ($Item.Status) { $Item.Status } else { "Unknown" }
+        
+        $instances = @()
+        try {
+            if (Get-Command Get-DOCDBInstance -ErrorAction SilentlyContinue) {
+                $allInstances = Get-DOCDBInstance -Credential $Credential -Region $Region -ErrorAction SilentlyContinue
+                $instances = $allInstances | Where-Object { $_.DBClusterIdentifier -eq $clusterId }
+            }
+        } catch {
+            Write-ScriptOutput "Failed to get instances for DocumentDB cluster $clusterId : $_" -Level Warning
+        }
+
+        $totalBytes = 0
+        try {
+            $metric = Get-SafeCWMetricStatistic -Namespace 'AWS/DocDB' -MetricName 'VolumeBytesUsed' -Dimensions @(@{ Name = 'DBClusterIdentifier'; Value = $clusterId }) -Period 86400 -Statistics 'Maximum' -Credential $Credential -Region $Region
+
+            if ($metric -and $metric.Datapoints -and $metric.Datapoints.Count -gt 0) {
+                $mv = ($metric.Datapoints | Sort-Object Timestamp -Descending | Select-Object -First 1).Maximum
+                if ($mv -and $mv -gt 0) {
+                    $totalBytes = [double]$mv
+                    Write-ScriptOutput "DocumentDB cluster storage via CloudWatch for ${clusterId}: $([math]::Round($mv/1GB,2)) GB" -Level Info
+                }
+            }
+        } catch {
+            Write-ScriptOutput "CloudWatch metrics failed for DocumentDB cluster $clusterId : $($_.Exception.Message)" -Level Warning
+        }
+
+        
+        if ($totalBytes -eq 0) {
+            try {
+                if ($Item.StorageUsed) {
+                    $totalBytes = [double]$Item.StorageUsed
+                } elseif ($Item.AllocatedStorage) {
+                    $totalBytes = [double]$Item.AllocatedStorage * 1GB
+                } else {
+                    if ($clusterStatus -eq "available" -and $instances.Count -gt 0) {
+                        $totalBytes = 1GB
+                        Write-ScriptOutput "DocumentDB cluster $clusterId - using default 1GB (no metrics available)" -Level Warning
+                    }
+                }
+            } catch {
+                Write-ScriptOutput "Failed to get storage from cluster properties for $clusterId" -Level Warning
+            }
+        }
+
+        $sizes = Convert-BytesToSizes -Bytes $totalBytes
+        $instanceCount = $instances.Count
+        $instanceTypes = $instances | ForEach-Object { $_.DBInstanceClass } | Sort-Object -Unique
+        $availabilityZones = $instances | ForEach-Object { $_.AvailabilityZone } | Where-Object { $_ } | Sort-Object -Unique
+
+        $docdbClusterObj = [PSCustomObject]@{
+            AwsAccountId          = "`u{200B}$($AccountInfo.Account)"
+            AwsAccountAlias       = $AccountAlias
+            Region                = $Region
+            DBClusterIdentifier   = $clusterId
+            Engine                = $engine
+            EngineVersion         = $engineVersion
+            ClusterStatus         = $clusterStatus
+            InstanceCount         = $instanceCount
+            InstanceTypes         = ($instanceTypes -join ";")
+            AvailabilityZones     = ($availabilityZones -join ";")
+            SizeGiB               = $sizes.SizeGiB
+            SizeTiB               = $sizes.SizeTiB
+            SizeGB                = $sizes.SizeGB
+            SizeTB                = $sizes.SizeTB
+            ClusterCreateTime     = if ($Item.ClusterCreateTime) { $Item.ClusterCreateTime } else { $null }
+            BackupRetentionPeriod = if ($Item.BackupRetentionPeriod) { $Item.BackupRetentionPeriod } else { 0 }
+            PreferredBackupWindow = if ($Item.PreferredBackupWindow) { $Item.PreferredBackupWindow } else { $null }
+            PreferredMaintenanceWindow = if ($Item.PreferredMaintenanceWindow) { $Item.PreferredMaintenanceWindow } else { $null }
+        }
+
+        try {
+            if ($Item.DBClusterArn -and (Get-Command Get-RDSTag -ErrorAction SilentlyContinue)) {
+                $tags = Get-RDSTag -ResourceName $Item.DBClusterArn -Credential $Credential -Region $Region -ErrorAction Stop
+                Add-TagProperties -Object $docdbClusterObj -Tags $tags
+            }
+        } catch {
+            Write-ScriptOutput "Failed to get tags for DocumentDB cluster $clusterId : $_" -Level Warning
+        }
+
+        return $docdbClusterObj
+    } catch {
+        Write-ScriptOutput "Failed to process DocumentDB cluster $($Item.DBClusterIdentifier): $($_.Exception.Message)" -Level Warning
+        return $null
+    }
+}
+
 function Process-DynamoDBTable {
     param($Item, $Credential, $Region, $AccountInfo, $AccountAlias)
     try {
@@ -1555,6 +1694,10 @@ function New-ServiceSummaryData {
             $row["Total Table Size (Bytes)"] = $totalTableBytes
             $row["Total Item Count"] = $totalItemCount
         }
+        if ($ServiceName -eq "S3") {
+            $totalObjectCount = ($ServiceList | ForEach-Object { if ($_.ObjectCount -ne $null -and $_.ObjectCount -ne '') { [long]$_.ObjectCount } else { 0 } } | Measure-Object -Sum).Sum
+            $row["Total Object Count"] = $totalObjectCount  
+        }
         if ($ServiceName -eq "EKS") {
             $totalNodeCount = ($ServiceList | ForEach-Object { if ($_.NodeCount -ne $null) { [int]$_.NodeCount } else { 0 } } | Measure-Object -Sum).Sum
             $row["Total Node Count"] = $totalNodeCount
@@ -1623,6 +1766,9 @@ function Get-RegionalBreakdown {
             $colHeader["Total Table Size (Bytes)"] = "Total Table Size (Bytes)"
             $colHeader["Total Item Count"] = "Total Item Count"
         }
+        if ($ServiceName -eq "S3") {
+            $colHeader["Total Object Count"] = "Total Object Count"
+        }
         $breakdownData += [PSCustomObject]$colHeader
     }
 
@@ -1657,6 +1803,10 @@ function Get-RegionalBreakdown {
                 if ($ServiceName -eq "EKS") {
                     $regionNodeCount = ($regionItems | ForEach-Object { if ($_.NodeCount -ne $null) { [int]$_.NodeCount } else { 0 } } | Measure-Object -Sum).Sum
                     $row["Total Node Count"] = $regionNodeCount
+                }
+                if ($ServiceName -eq "S3") {
+                    $regionObjectCount = ($regionItems | ForEach-Object { if ($_.ObjectCount -ne $null -and $_.ObjectCount -ne '') { [long]$_.ObjectCount } else { 0 } } | Measure-Object -Sum).Sum
+                    $row["Total Object Count"] = $regionObjectCount
                 }
 
                 $breakdownData += [PSCustomObject]$row
@@ -1843,13 +1993,14 @@ function New-AccountLevelSummary {
             "DynamoDB Details" = $script:ServiceDataByAccount[$AccountId]["DynamoDB"]
             "Redshift Details" = $script:ServiceDataByAccount[$AccountId]["Redshift"]
             "EKS Details" = $script:ServiceDataByAccount[$AccountId]["EKS"]
+            "DocumentDB Details" = $script:ServiceDataByAccount[$AccountId]["DocumentDB"]
         }
 
         foreach ($sheetName in $detailSheets.Keys) {
             if ($detailSheets[$sheetName] -and $detailSheets[$sheetName].Count -gt 0) {
                 if ($sheetName -eq "S3 Details") {
                     $dataSheets[$sheetName] = $detailSheets[$sheetName] |
-                        Select-Object AwsAccountId, AwsAccountAlias, Region, BucketName, CreationDate, SizeGiB, SizeTiB, SizeGB, SizeTB
+                        Select-Object AwsAccountId, AwsAccountAlias, Region, BucketName, ObjectCount, CreationDate, SizeGiB, SizeTiB, SizeGB, SizeTB
                 }
                 elseif ($sheetName -eq "FSx SVM Details") {
                     $svmItems = $detailSheets[$sheetName]
@@ -1902,6 +2053,9 @@ function Export-ServiceCSVFiles {
         $outputFileRDS = "${baseOutputRDS}_${accountSuffix}_$date_string.csv"
         $outputFileDynamoDB = "${baseOutputDynamoDB}_${accountSuffix}_$date_string.csv"
         $outputFileRedshift = "${baseOutputRedshift}_${accountSuffix}_$date_string.csv"
+        $outputFileEKS = "${baseOutputEKS}_${accountSuffix}_$date_string.csv"
+        $outputFileDocumentDB = "${baseOutputDocumentDB}_${accountSuffix}_$date_string.csv"
+
 
         $serviceExports = @{
             EC2 = @{ File = $outputFileEc2Instance; Data = $script:ServiceDataByAccount[$AccountId]["EC2"] }
@@ -1914,6 +2068,7 @@ function Export-ServiceCSVFiles {
             DynamoDB = @{ File = $outputFileDynamoDB; Data = $script:ServiceDataByAccount[$AccountId]["DynamoDB"] }
             Redshift = @{ File = $outputFileRedshift; Data = $script:ServiceDataByAccount[$AccountId]["Redshift"] }
             EKS = @{ File = $outputFileEKS; Data = $script:ServiceDataByAccount[$AccountId]["EKS"] }
+            DocumentDB = @{ File = $outputFileDocumentDB; Data = $script:ServiceDataByAccount[$AccountId]["DocumentDB"] }
         }
 
         foreach ($serviceName in $serviceExports.Keys) {
@@ -1926,7 +2081,7 @@ function Export-ServiceCSVFiles {
 
                 if ($serviceName -eq 'S3') {
                     $export.Data |
-                        Select-Object AwsAccountId, AwsAccountAlias, Region, BucketName, CreationDate, SizeGiB, SizeTiB, SizeGB, SizeTB |
+                        Select-Object AwsAccountId, AwsAccountAlias, Region, BucketName, ObjectCount, CreationDate, SizeGiB, SizeTiB, SizeGB, SizeTB |
                         Export-Csv -Path $export.File -NoTypeInformation
                 }
                 else {
@@ -1963,9 +2118,9 @@ function Export-DataToExcel {
         }
         $worksheetOrder = @(
             "EC2 Summary", "S3 Summary","EFS Summary", "FSX Summary","FSx SVM Summary",
-            "RDS Summary", "DynamoDB Summary", "Redshift Summary","EKS Summary", "Unattached Volume Summary",
+            "RDS Summary", "DynamoDB Summary", "Redshift Summary","DocumentDB Summary","EKS Summary", "Unattached Volume Summary",
             "EC2 Details", "S3 Details", "EFS Details", "FSx Details", "FSx SVM Details",
-            "RDS Details", "DynamoDB Details", "Redshift Details", "EKS Details","Unattached Volumes Details"
+            "RDS Details", "DynamoDB Details", "Redshift Details", "DocumentDB Details", "EKS Details","Unattached Volumes Details"
         )
         foreach ($sheetName in $worksheetOrder) {
             if ($DataSheets.Keys -contains $sheetName) {
@@ -2624,13 +2779,14 @@ function ComprehensiveSummary {
             "EKS Details" = $comprehensiveData["EKS"]
             "DynamoDB Details" = $comprehensiveData["DynamoDB"]
             "Redshift Details" = $comprehensiveData["Redshift"]
+            "DocumentDB Details" = $comprehensiveData["DocumentDB"]
         }
 
         foreach ($sheetName in $detailSheets.Keys) {
             if ($detailSheets[$sheetName] -and $detailSheets[$sheetName].Count -gt 0) {
                 if ($sheetName -eq "S3 Details") {
                     $dataSheets[$sheetName] = $detailSheets[$sheetName] |
-                        Select-Object AwsAccountId, AwsAccountAlias, Region, BucketName, CreationDate, SizeGiB, SizeTiB, SizeGB, SizeTB
+                        Select-Object AwsAccountId, AwsAccountAlias, Region, BucketName, ObjectCount, CreationDate, SizeGiB, SizeTiB, SizeGB, SizeTB
                 }
                 elseif ($sheetName -eq "FSx SVM Details") {
                     $svmItems = $detailSheets[$sheetName]
@@ -2691,6 +2847,9 @@ function MultiAccountComprehensiveSummaryData {
         if ($ServiceName -eq "EKS") {
             $row["Total Node Count"] = 0
         }
+        if ($ServiceName -eq "S3") {
+            $row["Total Object Count"] = 0
+        }
         $summaryData += [PSCustomObject]$row
         return $summaryData
     }
@@ -2723,6 +2882,10 @@ function MultiAccountComprehensiveSummaryData {
             $row["Total Table Size (Bytes)"] = $acctBytes
             $row["Total Item Count"] = $acctItems
         }
+        if ($ServiceName -eq "S3") {
+            $acctObjectCount = ($accountItems | ForEach-Object { if ($_.ObjectCount -ne $null -and $_.ObjectCount -ne '') { [long]$_.ObjectCount } else { 0 } } | Measure-Object -Sum).Sum
+            $row["Total Object Count"] = $acctObjectCount
+        }
 
         $summaryData += [PSCustomObject]$row
     }
@@ -2753,6 +2916,10 @@ function MultiAccountComprehensiveSummaryData {
     if ($ServiceName -eq "EKS") {
         $grandNodeCount = ($ServiceList | ForEach-Object { if ($_.NodeCount -ne $null) { [int]$_.NodeCount } else { 0 } } | Measure-Object -Sum).Sum
         $totalRow["Total Node Count"] = $grandNodeCount
+    }
+    if ($ServiceName -eq "S3") {
+        $grandObjectCount = ($ServiceList | ForEach-Object { if ($_.ObjectCount -ne $null -and $_.ObjectCount -ne '') { [long]$_.ObjectCount } else { 0 } } | Measure-Object -Sum).Sum
+        $totalRow["Total Object Count"] = $grandObjectCount
     }
     $summaryData += [PSCustomObject]$totalRow
 
@@ -2791,6 +2958,9 @@ function Get-MultiAccountRegionalBreakdown {
     if ($ServiceName -eq "EKS") {
         $header["Total Node Count"] = ""
     }
+    if ($ServiceName -eq "S3") {
+        $header["Total Object Count"] = ""
+    }
     $breakdownData += [PSCustomObject]$header
 
     $colHeader = [ordered]@{
@@ -2808,6 +2978,9 @@ function Get-MultiAccountRegionalBreakdown {
     }
     if ($ServiceName -eq "EKS") {
         $colHeader["Total Node Count"] = "Total Node Count"
+    }
+    if ($ServiceName -eq "S3") {
+        $colHeader["Total Object Count"] = "Total Object Count"
     }
     $breakdownData += [PSCustomObject]$colHeader
 
@@ -2842,6 +3015,10 @@ function Get-MultiAccountRegionalBreakdown {
                 $regionNodeCount = ($regionItems | ForEach-Object { if ($_.NodeCount -ne $null) { [int]$_.NodeCount } else { 0 } } | Measure-Object -Sum).Sum
                 $regionRow["Total Node Count"] = $regionNodeCount
             }
+            if ($ServiceName -eq "S3") {
+                $regionObjectCount = ($regionItems | ForEach-Object { if ($_.ObjectCount -ne $null -and $_.ObjectCount -ne '') { [long]$_.ObjectCount } else { 0 } } | Measure-Object -Sum).Sum
+                $regionRow["Total Object Count"] = $regionObjectCount
+            }
             $breakdownData += [PSCustomObject]$regionRow
 
             foreach ($accountId in $Accounts) {
@@ -2874,6 +3051,10 @@ function Get-MultiAccountRegionalBreakdown {
                         $accountRegionNodeCount = ($regionAccountItems | ForEach-Object { if ($_.NodeCount -ne $null) { [int]$_.NodeCount } else { 0 } } | Measure-Object -Sum).Sum
                         $acctRow["Total Node Count"] = $accountRegionNodeCount
                     }
+                    if ($ServiceName -eq "S3") {
+                        $accountRegionObjectCount = ($regionAccountItems | ForEach-Object { if ($_.ObjectCount -ne $null -and $_.ObjectCount -ne '') { [long]$_.ObjectCount } else { 0 } } | Measure-Object -Sum).Sum
+                        $acctRow["Total Object Count"] = $accountRegionObjectCount
+                    }
                     $breakdownData += [PSCustomObject]$acctRow
                 }
             }
@@ -2886,38 +3067,86 @@ function Get-MultiAccountRegionalBreakdown {
 function New-OutputArchive {
     try {
         Write-ScriptOutput "Creating output archive..." -Level Info
-
+        Start-Sleep -Seconds 2
+        
         if (Test-Path $archiveFile) {
             Remove-Item $archiveFile -Force
         }
 
-        $filesToArchive = $script:AllOutputFiles | Where-Object { Test-Path $_ }
+        $filesToArchive = @()
+        foreach ($file in $script:AllOutputFiles) {
+            if (Test-Path $file) {
+                $fileInfo = Get-Item $file
+                Write-ScriptOutput "Verified file: $($fileInfo.Name) (Size: $($fileInfo.Length) bytes)" -Level Info
+                $filesToArchive += $file
+            } else {
+                Write-ScriptOutput "Skipping missing file: $file" -Level Warning
+            }
+        }
 
         if ($filesToArchive.Count -gt 0) {
+            Add-Type -AssemblyName System.IO.Compression
             Add-Type -AssemblyName System.IO.Compression.FileSystem
+            
+            try {
+                $archive = [System.IO.Compression.ZipFile]::Open($archiveFile, [System.IO.Compression.ZipArchiveMode]::Create)
 
-            $archive = [System.IO.Compression.ZipFile]::Open($archiveFile, [System.IO.Compression.ZipArchiveMode]::Create)
-
-            foreach ($file in $filesToArchive) {
-                $fileName = Split-Path $file -Leaf
-                Write-ScriptOutput "Adding $fileName to archive..." -Level Info
-                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file, $fileName) | Out-Null
-            }
-
-            $archive.Dispose()
-
-            Write-ScriptOutput "Archive created: $archiveFile" -Level Success
-
-            if (Test-Path $archiveFile) {
                 foreach ($file in $filesToArchive) {
                     try {
-                        Remove-Item $file -Force
-                        Write-ScriptOutput "Removed individual file: $file" -Level Info
+                        $fileName = Split-Path $file -Leaf
+                        $fullPath = (Resolve-Path $file).Path
+                        Write-ScriptOutput "Adding $fileName to archive..." -Level Info
+                        
+                        if (Test-Path $fullPath) {
+                            $entry = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $fullPath, $fileName)
+                            Write-ScriptOutput "Successfully added $fileName (Entry size: $($entry.CompressedLength))" -Level Info
+                        } else {
+                            Write-ScriptOutput "File disappeared before archiving: $fullPath" -Level Warning
+                        }
                     }
                     catch {
-                        Write-ScriptOutput "Could not remove individual file $file`: $_" -Level Warning
+                        Write-ScriptOutput "Error adding file $file to archive: $_" -Level Warning
                     }
                 }
+            }
+            catch {
+                Write-ScriptOutput "Failed to create or access archive: $_" -Level Error
+                try {
+                    Write-ScriptOutput "Attempting fallback using Compress-Archive..." -Level Info
+                    Compress-Archive -Path $filesToArchive -DestinationPath $archiveFile -Force
+                    Write-ScriptOutput "Archive created using Compress-Archive fallback" -Level Success
+                }
+                catch {
+                    Write-ScriptOutput "Compress-Archive fallback also failed: $_" -Level Error
+                    return
+                }
+            }
+            finally {
+                try {
+                    if ($archive) { $archive.Dispose() }
+                } catch {
+                    Write-ScriptOutput "Warning during archive disposal: $_" -Level Warning
+                }
+            }
+
+            if (Test-Path $archiveFile) {
+                $archiveSize = (Get-Item $archiveFile).Length
+                Write-ScriptOutput "Archive created successfully: $archiveFile (Size: $archiveSize bytes)" -Level Success
+
+                foreach ($file in $filesToArchive) {
+                    try {
+                        if (Test-Path $file) {
+                            Remove-Item $file -Force
+                            Write-ScriptOutput "Removed individual file: ${file}" -Level Info
+                        }
+                    }
+                    catch {
+                        Write-ScriptOutput "Could not remove individual file ${file}: $_" -Level Warning
+                    }
+                }
+            }
+            else {
+                Write-ScriptOutput "Archive creation failed: file not found after compression" -Level Error
             }
         }
         else {
@@ -2926,6 +3155,7 @@ function New-OutputArchive {
     }
     catch {
         Write-ScriptOutput "Error creating output archive: $_" -Level Error
+        Write-ScriptOutput "Stack trace: $($_.ScriptStackTrace)" -Level Error
     }
 }
 
@@ -2948,7 +3178,8 @@ try {
     'AWS.Tools.Redshift',
     'AWS.Tools.FSx',
     'AWS.Tools.ElasticFileSystem',
-    'AWS.Tools.EKS'
+    'AWS.Tools.EKS',
+    'AWS.Tools.DocDB'
     )
 
     $missingModules = @()
