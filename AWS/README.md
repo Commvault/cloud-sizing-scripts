@@ -19,6 +19,7 @@
   - AWS.Tools.FSx  
   - AWS.Tools.ElasticFileSystem  
   - AWS.Tools.EKS  
+  - AWS.Tools.DocDB
   
 Execution Instructions
 ----------------------
@@ -64,7 +65,7 @@ Method 2 — Run locally
    Install-Module -Name ImportExcel -Scope CurrentUser -Force -Confirm:$false
    Install-Module -Name AWS.Tools.Installer -Scope CurrentUser -Force -Confirm:$false
 
-   Install-AWSToolsModule -Name AWS.Tools.Common,AWS.Tools.EC2,AWS.Tools.S3,AWS.Tools.SecurityToken,AWS.Tools.IdentityManagement,AWS.Tools.CloudWatch,AWS.Tools.RDS,AWS.Tools.DynamoDBv2,AWS.Tools.Redshift,AWS.Tools.FSx,AWS.Tools.ElasticFileSystem,AWS.Tools.EKS -Scope CurrentUser -CleanUp -Force -Confirm:$false
+   Install-AWSToolsModule -Name AWS.Tools.Common,AWS.Tools.EC2,AWS.Tools.S3,AWS.Tools.SecurityToken,AWS.Tools.IdentityManagement,AWS.Tools.CloudWatch,AWS.Tools.RDS,AWS.Tools.DynamoDBv2,AWS.Tools.Redshift,AWS.Tools.FSx,AWS.Tools.ElasticFileSystem,AWS.Tools.EKS,AWS.Tools.DocDB -Scope CurrentUser -CleanUp -Force -Confirm:$false
    ```
 4. Verify required modules are installed:
    ```powershell
@@ -168,6 +169,7 @@ The executing user/role must have the following IAM permissions for the script t
                 "fsx:ListTagsForResource",
                 "fsx:DescribeStorageVirtualMachines",
                 "rds:DescribeDBInstances",
+                "rds:DescribeDBClusters",
                 "rds:ListTagsForResource",
                 "dynamodb:ListTables",
                 "dynamodb:DescribeTable",
