@@ -16,7 +16,7 @@ The script collects information for the following services:
 - **Redshift** — Clusters  
 - **EKS** — Clusters and Associated PVCs
 
-The inventory captures **provisioned size details** for the above services, along with other configuration and metadata information.  
+The inventory captures provisioned size details for the above services, along with other configuration and metadata information.  
 Results are exported as timestamped Excel workbooks and consolidated ZIP archives for easy sharing and reporting.
 
 ## Requirements
