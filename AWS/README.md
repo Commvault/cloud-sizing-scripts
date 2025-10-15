@@ -1,5 +1,24 @@
 # AWS 
 
+## Overview
+
+This PowerShell Script inventories AWS Services across one or multiple accounts and regions.  
+It provides a unified view of key AWS resources, their configurations, and capacity metrics to assist with cost analysis, right-sizing, and capacity planning.
+
+The script collects information for the following services:
+- **EC2** — Instances with attached/unattached EBS volumes  
+- **S3** — Buckets and storage metrics  
+- **EFS** — Elastic File Systems  
+- **FSx** — File systems (ONTAP/SVX, Windows, Lustre, etc.)  
+- **RDS** — Database Instances  
+- **DynamoDB** — Tables with provisioned throughput details  
+- **DocumentDB** — Clusters  
+- **Redshift** — Clusters  
+- **EKS** — Clusters and Associated PVCs
+
+The inventory captures **provisioned size details for applicable services** (and **used size for S3**), along with other configuration and metadata information.  
+Results are exported as timestamped Excel workbooks and consolidated ZIP archives for easy sharing and reporting.
+
 ## Requirements
 - **PowerShell 7**  
   Download: https://github.com/PowerShell/PowerShell/releases  
