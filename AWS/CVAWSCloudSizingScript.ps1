@@ -15,12 +15,17 @@
       - DocumentDB clusters
       - Redshift clusters
       - EKS Clusters and PVCs associated with the cluster
+
+    The inventory includes provisioned size details for applicable workloads along with other configuration and metadata information.
+
     Supports multiple authentication methods including:
       - Access/Secret Key authentication (via Creds.txt or ProfileLocation)
       - Default AWS CLI profile (IAM role assumed automatically in CloudShell/EC2)
       - Cross-account role assumption
+
     Generates detailed Excel reports with both workload summaries and details,
     at the account level and across all accounts.
+    
     Includes hierarchical progress tracking and detailed logging.
     Outputs timestamped Excel files and creates a ZIP archive of all results.
 
