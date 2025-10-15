@@ -5,7 +5,7 @@
     AWS Cloud Sizing Script – Comprehensive inventory and sizing analysis for compute, storage, and databases.
 
 .DESCRIPTION
-    Inventories AWS workloads across one or multiple accounts and regions:
+    Inventories AWS Services across one or multiple accounts and regions:
       - EC2 instances (with attached/unattached EBS volumes)
       - S3 buckets and storage metrics
       - Elastic File System (EFS)
@@ -16,7 +16,7 @@
       - Redshift clusters
       - EKS Clusters and PVCs associated with the cluster
 
-    The inventory includes provisioned size details for applicable workloads along with other configuration and metadata information.
+    The inventory includes provisioned size details for applicable services and used size for S3 along with other configuration and metadata information.
 
     Supports multiple authentication methods including:
       - Access/Secret Key authentication (via Creds.txt or ProfileLocation)
@@ -25,7 +25,7 @@
 
     Generates detailed Excel reports with both workload summaries and details,
     at the account level and across all accounts.
-    
+
     Includes hierarchical progress tracking and detailed logging.
     Outputs timestamped Excel files and creates a ZIP archive of all results.
 
