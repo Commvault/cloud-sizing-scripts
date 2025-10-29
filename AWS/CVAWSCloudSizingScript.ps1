@@ -2604,14 +2604,20 @@ function Invoke-AuthenticationScenarios {
                         return
                     }
 
-                    $roleArn = "arn:aws:iam::${AccountId}:role/${roleName}"
+                    $partitionString = if ($script:Config.Partition -eq 'GovCloud') { 'aws-us-gov' } else { 'aws' }
+                    $roleArn = "arn:${partitionString}:iam::${AccountId}:role/${roleName}"
                     Write-ScriptOutput "DEBUG: Built role ARN: $roleArn" -Level Info
 
                     $sessionName = if ($CrossAccountRoleSessionName) { $CrossAccountRoleSessionName } else { "CVAWS-Cost-Sizing" }
+                    
+                    $stsRegion = if ($script:Config.Partition -eq 'GovCloud') { $script:Config.DefaultGovCloudQueryRegion } else { $script:Config.DefaultQueryRegion }
+                    Write-ScriptOutput "Using STS endpoint region $stsRegion for AssumeRole" -Level Info
+
                     $stsParams = @{
                         RoleArn = $roleArn
                         RoleSessionName = $sessionName
                         ErrorAction = 'Stop'
+                        Region = $stsRegion
                     }
                     if ($ExternalId) { $stsParams.ExternalId = $ExternalId }
 
@@ -3197,6 +3203,17 @@ try {
     if ($missingModules.Count -gt 0) {
         Write-ScriptOutput "Necessary modules not present. Missing modules: $($missingModules -join ', ')" -Level Error
         exit 1
+    }
+
+    if ($script:Config.Partition -eq 'GovCloud') {
+        $govRegion = $script:Config.DefaultGovCloudQueryRegion
+        $govStsEndpoint = "sts.$govRegion.amazonaws.com"
+        try {
+            Set-AWSDefaultConfiguration -Region $govRegion -StsEndpoint $govStsEndpoint
+            Write-ScriptOutput "Set default AWS configuration for GovCloud partition (Region: $govRegion, STS Endpoint: $govStsEndpoint)." -Level Info
+        } catch {
+            Write-ScriptOutput "Failed to set default AWS configuration for GovCloud. This may fail if the AWS.Tools.Common module is not fully loaded. Error: $_" -Level Warning
+        }
     }
 
     if ($ProfileLocation) {
