@@ -59,6 +59,20 @@
 .PARAMETER ExternalId
     External ID required for cross-account role assumption (Optional).
 
+.PARAMETER Services
+    Comma-separated list of AWS services to inventory. 
+    Valid values: EC2, S3, EFS, FSX, FSX_SVM, RDS, DynamoDB, Redshift, EKS, DocumentDB, UnattachedVolumes, All
+    
+    Default behavior (if not specified or set to "All"):
+      - All available services will be processed
+      - kubectl will only be installed if EKS clusters are discovered
+    
+    Examples:
+      -Services "EC2,S3,RDS"                          # Only inventory EC2, S3, and RDS
+      -Services "All"                                 # Inventory all services (explicit)
+      (no -Services parameter)                        # Inventory all services (default)
+      -Services "EC2,S3,EFS,RDS,DynamoDB"            # Multiple services excluding EKS
+
 .OUTPUTS
     Creates a timestamped output directory with the following files:
 
@@ -108,7 +122,22 @@ param (
     [string]$RegionToQuery,
     [switch]$SkipBucketTags,
     [switch]$DebugBucketTags,
-    [switch]$SelectiveZipping = $true
+    [switch]$SelectiveZipping = $true,
+    [ValidateSet(
+        'EC2',
+        'S3',
+        'EFS',
+        'FSX',
+        'FSX_SVM',
+        'RDS',
+        'DynamoDB',
+        'Redshift',
+        'EKS',
+        'DocumentDB',
+        'UnattachedVolumes',
+        'All'
+    )]
+    [string[]]$Services
 )
 
 
@@ -177,18 +206,18 @@ $script:ServiceRegistry = @{
         RequiresTagProcessing = $true
         SpecialHandling = $true
     }
-EKS = @{
-    DisplayName = "Kubernetes"
-    GetCommand = "Get-AllEKSClusters"
-    CandidateGetCommands = @("Get-AllEKSClusters","Get-EKSClusterList")
-    PropertyPath = $null
-    SizeProperty = "Custom"
-    IdProperty = "Name"
-    StorageType = "Block"
-    ProcessorFunction = "Process-EKSCluster"
-    RequiresTagProcessing = $false
-    SpecialHandling = $true
-}
+    EKS = @{
+        DisplayName = "Kubernetes"
+        GetCommand = "Get-AllEKSClusters"
+        CandidateGetCommands = @("Get-AllEKSClusters","Get-EKSClusterList")
+        PropertyPath = $null
+        SizeProperty = "Custom"
+        IdProperty = "Name"
+        StorageType = "Block"
+        ProcessorFunction = "Process-EKSCluster"
+        RequiresTagProcessing = $false
+        SpecialHandling = $true
+    }
 
     UnattachedVolumes = @{
         DisplayName = "Volumes"
@@ -248,11 +277,84 @@ EKS = @{
     }
 }
 
+function Write-ScriptOutput {
+    param(
+        [string]$Message,
+        [ValidateSet("Info", "Warning", "Error", "Success")]
+        [string]$Level = "Info"
+    )
+
+    $colors = @{
+        Info = "White"
+        Warning = "Yellow"
+        Error = "Red"
+        Success = "Green"
+    }
+
+    $timestamp = (Get-Date).ToString("HH:mm:ss")
+    $logTimestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $consoleMessage = "[$timestamp] $Message"
+    $logMessage = "[$logTimestamp] [$Level] $Message"
+
+    Write-Host $consoleMessage -ForegroundColor $colors[$Level]
+
+    try {
+        $logMessage | Out-File -FilePath $script:LogPath -Append -Encoding UTF8
+    }
+    catch {
+        Write-Host "[$timestamp] Warning: Failed to write to log file: $_" -ForegroundColor Yellow
+    }
+}
+
+$script:EnabledServices = @{}
+
+if ($Services -and $Services.Count -gt 0 -and -not ($Services -contains 'All')) {
+
+    # Normalize input to uppercase
+    $requestedServices = $Services | ForEach-Object { $_.ToUpper() }
+
+    # Disable all first
+    foreach ($serviceName in $script:ServiceRegistry.Keys) {
+        $script:EnabledServices[$serviceName] = $false
+    }
+
+    foreach ($service in $requestedServices) {
+        $found = $false
+
+        foreach ($registeredService in $script:ServiceRegistry.Keys) {
+            if ($registeredService.ToUpper() -eq $service) {
+                $script:EnabledServices[$registeredService] = $true
+                $found = $true
+                Write-ScriptOutput "Service enabled: $registeredService" -Level Info
+                break
+            }
+        }
+
+        if (-not $found) {
+            Write-ScriptOutput "Warning: Service '$service' not recognized. Available services: $($script:ServiceRegistry.Keys -join ', ')" -Level Warning
+        }
+    }
+}
+else {
+    # All services enabled by default
+    foreach ($serviceName in $script:ServiceRegistry.Keys) {
+        $script:EnabledServices[$serviceName] = $true
+    }
+
+    Write-ScriptOutput "Services parameter not specified or set to 'All'. All available services will be processed." -Level Info
+}
+
+$enabledList = $script:EnabledServices.GetEnumerator() |
+    Where-Object { $_.Value } |
+    Select-Object -ExpandProperty Key
+
+Write-ScriptOutput "Services selected for processing: $($enabledList -join ', ')" -Level Info
+
 $script:Config = @{
     DefaultQueryRegion = if ($RegionToQuery) { $RegionToQuery } else { "us-east-1" }
     DefaultGovCloudQueryRegion = "us-gov-west-1"
     Partition = if ($Partition) { $Partition } else { "Standard" }
-    ProfileLocation = if ($ProfileLocation) { @{ProfileLocation = $ProfileLocation} } else { @{} }
+    ProfileLocation = if ($ProfileLocation) { @{ ProfileLocation = (Resolve-Path $ProfileLocation -ErrorAction Stop).Path } } else { @{} }
     OutputPath = (Get-Location).Path
     SkipBucketTags = $SkipBucketTags.IsPresent
     DebugBucketTags = $DebugBucketTags.IsPresent
@@ -282,7 +384,8 @@ $baseOutputDynamoDB = "aws_dynamodb_info"
 $baseOutputRedshift = "aws_redshift_info"
 $baseOutputEKS = "aws_eks_info"
 $baseOutputDocumentDB = "aws_documentdb_info"
-$archiveFile = "aws_sizing_results_$date_string.zip"
+$archiveFileName = "aws_sizing_results_$date_string.zip"
+$archiveFile = Join-Path $script:Config.OutputPath $archiveFileName
 
 function Show-ScriptProgress {
     param(
@@ -359,35 +462,6 @@ function Get-SafeCWMetricStatistic {
     }
 }
 
-function Write-ScriptOutput {
-    param(
-        [string]$Message,
-        [ValidateSet("Info", "Warning", "Error", "Success")]
-        [string]$Level = "Info"
-    )
-
-    $colors = @{
-        Info = "White"
-        Warning = "Yellow"
-        Error = "Red"
-        Success = "Green"
-    }
-
-    $timestamp = (Get-Date).ToString("HH:mm:ss")
-    $logTimestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    $consoleMessage = "[$timestamp] $Message"
-    $logMessage = "[$logTimestamp] [$Level] $Message"
-
-    Write-Host $consoleMessage -ForegroundColor $colors[$Level]
-
-    try {
-        $logMessage | Out-File -FilePath $script:LogPath -Append -Encoding UTF8
-    }
-    catch {
-        Write-Host "[$timestamp] Warning: Failed to write to log file: $_" -ForegroundColor Yellow
-    }
-}
-
 function Convert-BytesToSizes {
     param([double]$Bytes)
 
@@ -422,7 +496,7 @@ function Initialize-ServiceCollections {
     if (-not $script:ServiceDataByAccount.ContainsKey($AccountId)) {
         $script:ServiceDataByAccount[$AccountId] = @{}
 
-        foreach ($serviceName in $script:ServiceRegistry.Keys) {
+        foreach ($serviceName in $script:EnabledServices.Keys | Where-Object { $script:EnabledServices[$_] }) {
             $script:ServiceDataByAccount[$AccountId][$serviceName] = [System.Collections.ArrayList]@()
         }
     }
@@ -436,6 +510,12 @@ function Invoke-ServiceInventory {
         [object]$AccountInfo,
         [string]$AccountAlias
     )
+
+    # Check if service is enabled
+    if (-not $script:EnabledServices[$ServiceName]) {
+        Write-ScriptOutput "$ServiceName is disabled (not in Services list). Skipping." -Level Info
+        return
+    }
 
     $serviceConfig = $script:ServiceRegistry[$ServiceName]
     if (-not $serviceConfig) {
@@ -1899,10 +1979,11 @@ function Get-S3ServiceTotals {
 
             try { $d = [double]$val } catch { continue }
 
-            if ($p -match '(_SizeGiB$|^SizeGiB$)')       { $totalGiB += $d; continue }
-            if ($p -match '(_SizeGB$|^SizeGB$)')         { $totalGB  += $d; continue }
-            if ($p -match '(_SizeTiB$|^SizeTiB$)')       { $totalTiB += $d; continue }
-            if ($p -match '(_SizeTB$|^SizeTB$)')         { $totalTB  += $d; continue }
+            if ($p -eq 'SizeGiB') { $totalGiB += $d; continue }
+            if ($p -eq 'SizeGB')  { $totalGB  += $d; continue }
+            if ($p -eq 'SizeTiB') { $totalTiB += $d; continue }
+            if ($p -eq 'SizeTB')  { $totalTB  += $d; continue }
+
         }
     }
 
@@ -1912,6 +1993,7 @@ function Get-S3ServiceTotals {
 
     return @{ GiB = $totalGiB; TiB = $totalTiB; GB = $totalGB; TB = $totalTB }
 }
+
 function Get-FSxServiceTotals {
     param([array]$ServiceList)
 
@@ -1974,7 +2056,7 @@ function New-AccountLevelSummary {
         $accountSummaryFile = "${AccountId}_summary_$date_string.xlsx"
         $dataSheets = [ordered]@{}
 
-        foreach ($serviceName in $script:ServiceRegistry.Keys) {
+        foreach ($serviceName in $script:EnabledServices.Keys | Where-Object { $script:EnabledServices[$_] }) {
             $serviceList = $script:ServiceDataByAccount[$AccountId][$serviceName]
             $summarySheetName = if ($serviceName -eq "UnattachedVolumes") {
                 "Unattached Volume Summary"
@@ -1987,19 +2069,19 @@ function New-AccountLevelSummary {
                 $dataSheets[$summarySheetName] = New-ServiceSummaryData -ServiceName $serviceName -ServiceList $serviceList
             }        }
 
-        $detailSheets = @{
-            "EC2 Details" = $script:ServiceDataByAccount[$AccountId]["EC2"]
-            "S3 Details" = $script:ServiceDataByAccount[$AccountId]["S3"]
-            "Unattached Volumes" = $script:ServiceDataByAccount[$AccountId]["UnattachedVolumes"]
-            "EFS Details" = $script:ServiceDataByAccount[$AccountId]["EFS"]
-            "FSx Details" = $script:ServiceDataByAccount[$AccountId]["FSX"]
-            "FSx SVM Details" = $script:ServiceDataByAccount[$AccountId]["FSX_SVM"]
-            "RDS Details" = $script:ServiceDataByAccount[$AccountId]["RDS"]
-            "DynamoDB Details" = $script:ServiceDataByAccount[$AccountId]["DynamoDB"]
-            "Redshift Details" = $script:ServiceDataByAccount[$AccountId]["Redshift"]
-            "EKS Details" = $script:ServiceDataByAccount[$AccountId]["EKS"]
-            "DocumentDB Details" = $script:ServiceDataByAccount[$AccountId]["DocumentDB"]
-        }
+            $detailSheets = @{
+                "EC2 Details" = if ($script:EnabledServices["EC2"]) { $script:ServiceDataByAccount[$AccountId]["EC2"] } else { $null }
+                "S3 Details" = if ($script:EnabledServices["S3"]) { $script:ServiceDataByAccount[$AccountId]["S3"] } else { $null }
+                "Unattached Volumes" = if ($script:EnabledServices["UnattachedVolumes"]) { $script:ServiceDataByAccount[$AccountId]["UnattachedVolumes"] } else { $null }
+                "EFS Details" = if ($script:EnabledServices["EFS"]) { $script:ServiceDataByAccount[$AccountId]["EFS"] } else { $null }
+                "FSx Details" = if ($script:EnabledServices["FSX"]) { $script:ServiceDataByAccount[$AccountId]["FSX"] } else { $null }
+                "FSx SVM Details" = if ($script:EnabledServices["FSX_SVM"]) { $script:ServiceDataByAccount[$AccountId]["FSX_SVM"] } else { $null }
+                "RDS Details" = if ($script:EnabledServices["RDS"]) { $script:ServiceDataByAccount[$AccountId]["RDS"] } else { $null }
+                "DynamoDB Details" = if ($script:EnabledServices["DynamoDB"]) { $script:ServiceDataByAccount[$AccountId]["DynamoDB"] } else { $null }
+                "Redshift Details" = if ($script:EnabledServices["Redshift"]) { $script:ServiceDataByAccount[$AccountId]["Redshift"] } else { $null }
+                "EKS Details" = if ($script:EnabledServices["EKS"]) { $script:ServiceDataByAccount[$AccountId]["EKS"] } else { $null }
+                "DocumentDB Details" = if ($script:EnabledServices["DocumentDB"]) { $script:ServiceDataByAccount[$AccountId]["DocumentDB"] } else { $null }
+            }
 
         foreach ($sheetName in $detailSheets.Keys) {
             if ($detailSheets[$sheetName] -and $detailSheets[$sheetName].Count -gt 0) {
@@ -2077,6 +2159,11 @@ function Export-ServiceCSVFiles {
         }
 
         foreach ($serviceName in $serviceExports.Keys) {
+            if (-not $script:EnabledServices[$serviceName]) {
+                Write-ScriptOutput "Skipping CSV export for disabled service: $serviceName" -Level Info
+                continue
+            }    
+
             $export = $serviceExports[$serviceName]
             if ($export.Data -and $export.Data.Count -gt 0) {
                 if (-not $export.File -or [string]::IsNullOrWhiteSpace($export.File)) {
@@ -2395,7 +2482,7 @@ function Invoke-AWSDataCollection {
 
             Set-RegionPartition -Region $awsRegion
 
-            foreach ($serviceName in $script:ServiceRegistry.Keys) {
+            foreach ($serviceName in $script:EnabledServices.Keys | Where-Object { $script:EnabledServices[$_] }) {
                 Invoke-ServiceInventory -ServiceName $serviceName -Credential $Credential -Region $awsRegion -AccountInfo $accountInfo -AccountAlias $accountInfo.AccountAlias
             }
 
@@ -2745,7 +2832,7 @@ function ComprehensiveSummary {
 
         $comprehensiveData = @{}
 
-        foreach ($serviceName in $script:ServiceRegistry.Keys) {
+        foreach ($serviceName in $script:EnabledServices.Keys | Where-Object { $script:EnabledServices[$_] }) {
             $allServiceData = @()
             foreach ($accountId in $script:ServiceDataByAccount.Keys) {
                 $accountData = $script:ServiceDataByAccount[$accountId][$serviceName]
@@ -2759,7 +2846,7 @@ function ComprehensiveSummary {
         $comprehensiveFile = "comprehensive_all_aws_accounts_summary_$date_string.xlsx"
         $dataSheets = [ordered]@{}
 
-        foreach ($serviceName in $script:ServiceRegistry.Keys) {
+        foreach ($serviceName in $script:EnabledServices.Keys | Where-Object { $script:EnabledServices[$_] }) {
             $serviceList = $comprehensiveData[$serviceName]
             $summarySheetName = if ($serviceName -eq "UnattachedVolumes") {
                 "Unattached Volume Summary"
@@ -2774,17 +2861,17 @@ function ComprehensiveSummary {
         }
 
         $detailSheets = @{
-            "EC2 Details" = $comprehensiveData["EC2"]
-            "S3 Details" = $comprehensiveData["S3"]
-            "Unattached Volumes" = $comprehensiveData["UnattachedVolumes"]
-            "EFS Details" = $comprehensiveData["EFS"]
-            "FSx Details" = $comprehensiveData["FSX"]
-            "FSx SVM Details" = $comprehensiveData["FSX_SVM"]
-            "RDS Details" = $comprehensiveData["RDS"]
-            "EKS Details" = $comprehensiveData["EKS"]
-            "DynamoDB Details" = $comprehensiveData["DynamoDB"]
-            "Redshift Details" = $comprehensiveData["Redshift"]
-            "DocumentDB Details" = $comprehensiveData["DocumentDB"]
+            "EC2 Details" = if ($script:EnabledServices["EC2"]) { $comprehensiveData["EC2"] } else { $null }
+            "S3 Details" = if ($script:EnabledServices["S3"]) { $comprehensiveData["S3"] } else { $null }
+            "Unattached Volumes" = if ($script:EnabledServices["UnattachedVolumes"]) { $comprehensiveData["UnattachedVolumes"] } else { $null }
+            "EFS Details" = if ($script:EnabledServices["EFS"]) { $comprehensiveData["EFS"] } else { $null }
+            "FSx Details" = if ($script:EnabledServices["FSX"]) { $comprehensiveData["FSX"] } else { $null }
+            "FSx SVM Details" = if ($script:EnabledServices["FSX_SVM"]) { $comprehensiveData["FSX_SVM"] } else { $null }
+            "RDS Details" = if ($script:EnabledServices["RDS"]) { $comprehensiveData["RDS"] } else { $null }
+            "EKS Details" = if ($script:EnabledServices["EKS"]) { $comprehensiveData["EKS"] } else { $null }
+            "DynamoDB Details" = if ($script:EnabledServices["DynamoDB"]) { $comprehensiveData["DynamoDB"] } else { $null }
+            "Redshift Details" = if ($script:EnabledServices["Redshift"]) { $comprehensiveData["Redshift"] } else { $null }
+            "DocumentDB Details" = if ($script:EnabledServices["DocumentDB"]) { $comprehensiveData["DocumentDB"] } else { $null }
         }
 
         foreach ($sheetName in $detailSheets.Keys) {
@@ -3227,7 +3314,7 @@ try {
 
     foreach ($account in $script:AccountsProcessed) {
         Write-ScriptOutput "Account: $($account.Account) ($($account.AccountAlias))" -Level Info
-        foreach ($serviceName in $script:ServiceRegistry.Keys) {
+        foreach ($serviceName in $script:EnabledServices.Keys | Where-Object { $script:EnabledServices[$_] }) {
             $count = $script:ServiceDataByAccount[$account.Account][$serviceName].Count
             Write-ScriptOutput "  $serviceName`: $count items" -Level Info
         }
