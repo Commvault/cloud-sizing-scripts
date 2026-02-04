@@ -68,10 +68,10 @@
       - kubectl will only be installed if EKS clusters are discovered
     
     Examples:
-      -Services "EC2,S3,RDS"                          # Only inventory EC2, S3, and RDS
-      -Services "All"                                 # Inventory all services (explicit)
+      -Services EC2,S3,RDS                          # Only inventory EC2, S3, and RDS
+      -Services All                                 # Inventory all services (explicit)
       (no -Services parameter)                        # Inventory all services (default)
-      -Services "EC2,S3,EFS,RDS,DynamoDB"            # Multiple services excluding EKS
+      -Services EC2,S3,EFS,RDS,DynamoDB            # Multiple Services
 
 .OUTPUTS
     Creates a timestamped output directory with the following files:
