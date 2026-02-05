@@ -354,7 +354,7 @@ $script:Config = @{
     DefaultQueryRegion = if ($RegionToQuery) { $RegionToQuery } else { "us-east-1" }
     DefaultGovCloudQueryRegion = "us-gov-west-1"
     Partition = if ($Partition) { $Partition } else { "Standard" }
-    ProfileLocation = if ($ProfileLocation) { @{ ProfileLocation = (Resolve-Path $ProfileLocation -ErrorAction Stop).Path } } else { @{} }
+    ProfileLocation = if ($ProfileLocation) { @{ProfileLocation = $ProfileLocation} } else { @{} }
     OutputPath = (Get-Location).Path
     SkipBucketTags = $SkipBucketTags.IsPresent
     DebugBucketTags = $DebugBucketTags.IsPresent
