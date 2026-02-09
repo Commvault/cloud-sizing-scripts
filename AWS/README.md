@@ -103,16 +103,44 @@ Method 2 — Run locally
    ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-west-2"
    ```
 
-Common script parameters
+**Common script parameters**
 - -DefaultProfile — Uses default AWS CLI profile / CloudShell role.
 - -UserSpecifiedProfileNames "Profile1,Profile2" — comma-separated local profiles.
 - -AllLocalProfiles — process all local profiles given in Credential File.
 - -ProfileLocation "<path>" — shared Credentials file path.
 - -CrossAccountRoleName "<RoleName>" — role to assume in target accounts.
 - -Regions "us-east-1,us-west-2" — comma-separated regions to query.
+- -Services EC2,S3,RDS — Comma-separated list of services to inventory (see **Service Filtering** below).
 
 
-Credential Files:
+**Service Filtering:**
+
+By default, the script inventories **all available services**. To inventory only specific services, use the `-Services` parameter.
+
+**Supported Services:**
+- `EC2` — EC2 instances and attached/unattached EBS volumes
+- `S3` — S3 buckets and storage metrics
+- `EFS` — Elastic File Systems
+- `FSX` — FSx file systems (Windows, ONTAP, Lustre, etc.)
+- `FSX_SVM` — FSx ONTAP Storage Virtual Machines and volumes
+- `RDS` — RDS database instances and Aurora clusters
+- `DynamoDB` — DynamoDB tables with provisioned throughput
+- `DocumentDB` — DocumentDB clusters
+- `Redshift` — Redshift clusters
+- `EKS` — EKS clusters and associated PVCs
+- `UnattachedVolumes` — Unattached EBS volumes
+
+**Service Filtering Examples:**
+```powershell
+# Inventory only EC2 and S3 (without quotes - with tab completion)
+./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1" -Services EC2,S3
+
+# Inventory all services (default behavior - same as not specifying -Services)
+./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1" -Services All
+```
+- **Note – Without quotes** `./CVAWSCloudSizingScript.ps1 -Services EC2,S3` — Enables PowerShell tab-completion for service names
+
+**Credential Files:**
 - Creds.txt (AWS shared credentials format)
 ```ini
 [Profile1]
@@ -131,7 +159,7 @@ aws_secret_access_key = <SecretKey2>
 555555555555
 ```
 
-Example invocations
+**Example invocations:**
 ```powershell
 # CloudShell using CloudShell role (default IAM role)
 ./CVAWSCloudSizingScript.ps1 -DefaultProfile -Regions "us-east-1"
@@ -144,6 +172,10 @@ Example invocations
 
 # Cross-account role using file with account IDs [CloudShell]
 ./CVAWSCloudSizingScript.ps1 -CrossAccountRoleName "InventoryRole" -UserSpecifiedAccounts "123456789012" -Regions "us-east-1"
+
+# Inventory only S3, EC2, and UnattachedVolumes
+./CVAWSCloudSizingScript.ps1 -UserSpecifiedProfileNames "prod,dev" -ProfileLocation ".\Creds.txt" -Regions "us-east-2" -Services S3,EC2,UnattachedVolumes
+
 ```
 
 
