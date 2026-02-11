@@ -311,7 +311,9 @@ function Write-ScriptOutput {
 if ($EnableTagProcessing.IsPresent) {
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] EnableTagProcessing flag detected. Enabling tag fetching for all services." -ForegroundColor Green
     foreach ($serviceName in $script:ServiceRegistry.Keys) {
-        $script:ServiceRegistry[$serviceName].RequiresTagProcessing = $true
+        if ($serviceName -ne "S3" -or -not $SkipBucketTags.IsPresent) {
+            $script:ServiceRegistry[$serviceName].RequiresTagProcessing = $true
+        }
     }
 } else {
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Tag processing disabled by default (RequiresTagProcessing = false for all services). Use -EnableTagProcessing to enable tag fetching." -ForegroundColor Yellow
@@ -790,7 +792,13 @@ function Process-S3Bucket {
                 $bucketTags = @()
             }
         } else {
-            Write-ScriptOutput "Skipping tag fetch for S3 bucket $bucketName (RequiresTagProcessing = false)" -Level Info
+            $skipReason = if ($script:Config.SkipBucketTags) {
+                "SkipBucketTags = true"
+            } else {
+                "RequiresTagProcessing = false"
+            }
+
+            Write-ScriptOutput "Skipping tag fetch for S3 bucket $bucketName ($skipReason)" -Level Info
         }
 
         $sizes = Convert-BytesToSizes -Bytes $totalBytes
