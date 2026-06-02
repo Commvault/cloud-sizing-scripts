@@ -261,13 +261,163 @@ function Write-Log {
     }
 }
 
+function Resolve-WorkerLogPath {
+    param(
+        [Parameter(Mandatory)][string]$WorkerOutputDir,
+        [string]$CurrentPath = ''
+    )
+
+    if ($CurrentPath -and (Test-Path -LiteralPath $CurrentPath)) {
+        return [string]$CurrentPath
+    }
+
+    $candidates = @(
+        Get-ChildItem -LiteralPath $WorkerOutputDir -Filter 'gcp_sizing_script_output_*.log' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending
+    )
+    if ($candidates.Count -gt 0) {
+        return [string]$candidates[0].FullName
+    }
+
+    return ''
+}
+
+function Read-SharedFileDelta {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [long]$Offset = 0
+    )
+
+    $safeOffset = if ($Offset -lt 0) { 0L } else { [long]$Offset }
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return [PSCustomObject]@{ Offset = $safeOffset; Lines = @() }
+    }
+
+    $newOffset = $safeOffset
+    $content = ''
+    try {
+        $fileStream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+        try {
+            if ($safeOffset -gt $fileStream.Length) {
+                $safeOffset = 0L
+            }
+            [void]$fileStream.Seek($safeOffset,[System.IO.SeekOrigin]::Begin)
+            $reader = New-Object System.IO.StreamReader($fileStream,[System.Text.Encoding]::UTF8,$true,4096,$true)
+            try {
+                $content = $reader.ReadToEnd()
+                $newOffset = [long]$fileStream.Position
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            $fileStream.Dispose()
+        }
+    }
+    catch {
+        return [PSCustomObject]@{ Offset = $safeOffset; Lines = @() }
+    }
+
+    if ([string]::IsNullOrEmpty($content)) {
+        return [PSCustomObject]@{ Offset = $newOffset; Lines = @() }
+    }
+
+    $lines = @($content -split "`r?`n" | Where-Object { $_ -ne '' })
+    return [PSCustomObject]@{ Offset = $newOffset; Lines = $lines }
+}
+
+function Get-LatestFileByPattern {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][string]$Pattern
+    )
+
+    if (-not (Test-Path -LiteralPath $Directory)) { return '' }
+
+    $candidate = Get-ChildItem -LiteralPath $Directory -Filter $Pattern -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+
+    if ($candidate) { return [string]$candidate.FullName }
+    return ''
+}
+
+function Get-CsvDetailRowsFromMixedFile {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$Columns
+    )
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $rows.ToArray()
+    }
+
+    $reader = $null
+    try {
+        $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+        $reader = New-Object System.IO.StreamReader($stream,[System.Text.Encoding]::UTF8,$true)
+
+        $headerSeen = $false
+        while (($line = $reader.ReadLine()) -ne $null) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            if ($line.StartsWith('### ') -or $line -eq 'FailedProjects' -or $line -eq 'Project,Reason,Component,Message') {
+                break
+            }
+
+            if (-not $headerSeen) {
+                $headerSeen = $true
+                continue
+            }
+
+            try {
+                $parsed = @($line | ConvertFrom-Csv -Header $Columns)
+                if ($parsed.Count -eq 0) { continue }
+
+                $first = $parsed[0]
+                $out = [ordered]@{}
+                foreach ($col in $Columns) {
+                    $out[$col] = [string](Get-OptionalPropertyValue -Object $first -Name $col -Default '')
+                }
+                $rows.Add([PSCustomObject]$out) | Out-Null
+            }
+            catch {
+                continue
+            }
+        }
+    }
+    finally {
+        if ($reader) { $reader.Dispose() }
+    }
+
+    return $rows.ToArray()
+}
+
 # -------------------------
 # Decimal helpers
 # -------------------------
 function Convert-ToDecimal {
     param($Value)
     if ($null -eq $Value) { return [decimal]0 }
-    try { return [decimal]$Value } catch { return [decimal]0 }
+
+    if ($Value -is [decimal]) { return $Value }
+    try {
+        if ($Value -is [double] -or $Value -is [single] -or $Value -is [float]) {
+            $txt = [string]::Format([System.Globalization.CultureInfo]::InvariantCulture,'{0:R}',$Value)
+            return [decimal]::Parse($txt,[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        if ($Value -is [int64] -or $Value -is [int32] -or $Value -is [uint64] -or $Value -is [uint32]) {
+            return [decimal]$Value
+        }
+
+        $s = [string]$Value
+        if (-not $s) { return [decimal]0 }
+        return [decimal]::Parse($s,[System.Globalization.NumberStyles]::Float,[System.Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        try { return [decimal]$Value } catch { return [decimal]0 }
+    }
 }
 
 function Round-Decimal {
@@ -291,9 +441,42 @@ function Get-MeasureSumSafe {
 function Convert-BytesToDecimalGB { param($Bytes,[int]$Scale=6) return (Round-Decimal -Value ((Convert-ToDecimal $Bytes)/[decimal]1000000000) -Scale $Scale) }
 function Convert-BytesToDecimalMB { param($Bytes,[int]$Scale=6) return (Round-Decimal -Value ((Convert-ToDecimal $Bytes)/[decimal]1000000) -Scale $Scale) }
 function Convert-BytesToDecimalTB { param($Bytes,[int]$Scale=6) return (Round-Decimal -Value ((Convert-ToDecimal $Bytes)/[decimal]1000000000000) -Scale $Scale) }
+function Convert-BytesToDecimalPB { param($Bytes,[int]$Scale=6) return (Round-Decimal -Value ((Convert-ToDecimal $Bytes)/[decimal]1000000000000000) -Scale $Scale) }
 function Convert-BytesToTiB { param($Bytes,[int]$Scale=6) return (Round-Decimal -Value ((Convert-ToDecimal $Bytes)/[decimal]1099511627776) -Scale $Scale) }
 function Convert-GBToDecimalTB { param($GB,[int]$Scale=6) return (Round-Decimal -Value ((Convert-ToDecimal $GB)/[decimal]1000) -Scale $Scale) }
+function Convert-GBToDecimalPB { param($GB,[int]$Scale=6) return (Round-Decimal -Value ((Convert-ToDecimal $GB)/[decimal]1000000) -Scale $Scale) }
 function Convert-GBToDecimalMB { param($GB,[int]$Scale=6) return (Round-Decimal -Value ((Convert-ToDecimal $GB)*[decimal]1000) -Scale $Scale) }
+
+function Get-SizeFacetsFromGB {
+    param(
+        [Parameter(Mandatory)]$GB,
+        [int]$Scale = 6
+    )
+
+    $gb = Round-Decimal -Value (Convert-ToDecimal $GB) -Scale $Scale
+    return [PSCustomObject]@{
+        MB = Convert-GBToDecimalMB -GB $gb -Scale $Scale
+        GB = $gb
+        TB = Convert-GBToDecimalTB -GB $gb -Scale $Scale
+        PB = Convert-GBToDecimalPB -GB $gb -Scale $Scale
+    }
+}
+
+function Get-SizeFacetsFromBytes {
+    param(
+        [Parameter(Mandatory)]$Bytes,
+        [int]$Scale = 6
+    )
+
+    $bytes = Convert-ToDecimal $Bytes
+    return [PSCustomObject]@{
+        MB = Convert-BytesToDecimalMB -Bytes $bytes -Scale $Scale
+        GB = Convert-BytesToDecimalGB -Bytes $bytes -Scale $Scale
+        TB = Convert-BytesToDecimalTB -Bytes $bytes -Scale $Scale
+        PB = Convert-BytesToDecimalPB -Bytes $bytes -Scale $Scale
+    }
+}
+
 function Format-WholeNumber {
     param($Value)
     return ([decimal]::Round((Convert-ToDecimal $Value),0,[System.MidpointRounding]::AwayFromZero)).ToString('0',[System.Globalization.CultureInfo]::InvariantCulture)
@@ -692,17 +875,43 @@ function Update-RunProgress {
     Write-Log -Level INFO -Message ("[Progress] {0}% | Completed={1}/{2} | CurrentProject={3}/{2} | Project={4} | Stage={5} | Elapsed={6}" -f $pct,$CompletedProjects,$TotalProjects,$current,$Project,$Stage,$elapsedTxt)
 }
 
+function Update-WorkerPoolProgress {
+    param(
+        [Parameter(Mandatory)][int]$CompletedWorkers,
+        [Parameter(Mandatory)][int]$TotalWorkers,
+        [Parameter(Mandatory)][int]$RunningWorkers,
+        [Parameter(Mandatory)][int]$CompletedProjects,
+        [Parameter(Mandatory)][int]$TotalProjects,
+        [string]$PerWorkerStatus = '',
+        [Parameter(Mandatory)][TimeSpan]$Elapsed
+    )
+
+    $pct = 0
+    if ($TotalProjects -gt 0) {
+        $pct = [Math]::Min(100,[Math]::Max(0,[int](($CompletedProjects * 100) / $TotalProjects)))
+    }
+
+    $elapsedTxt = $Elapsed.ToString('hh\:mm\:ss')
+    $statusText = ("{0}% | Projects={1}/{2} | Workers Done={3}/{4} | Running={5} | Elapsed={6}" -f $pct,$CompletedProjects,$TotalProjects,$CompletedWorkers,$TotalWorkers,$RunningWorkers,$elapsedTxt)
+    if ($PerWorkerStatus) {
+        $statusText = $statusText + (" | {0}" -f $PerWorkerStatus)
+    }
+    Write-Progress -Id 2 -Activity 'GCP API Inventory Progress' -Status $statusText -PercentComplete $pct
+}
+
 function Get-ProjectWorkerCount {
     param([int]$TotalProjects)
 
     if ($TotalProjects -le 1) { return 1 }
 
+    $hostSafeCap = [Math]::Max(1,[Math]::Min(4,[int]$script:RecommendedMaxThreads))
+    if ($script:HostMemoryGb -le 16) { $hostSafeCap = [Math]::Min($hostSafeCap,3) }
+    if ($script:HostMemoryGb -le 8) { $hostSafeCap = [Math]::Min($hostSafeCap,2) }
+
     if ($ProjectWorkers -gt 0) {
-        $count = $ProjectWorkers
+        $count = [Math]::Min($ProjectWorkers,$hostSafeCap)
     } else {
-        $auto = [Math]::Max(2,[Math]::Min(4,[int]$script:RecommendedMaxThreads))
-        if ($script:HostMemoryGb -le 16) { $auto = [Math]::Min($auto,3) }
-        if ($script:HostMemoryGb -le 8) { $auto = 2 }
+        $auto = $hostSafeCap
         $count = $auto
     }
 
@@ -726,7 +935,10 @@ function Invoke-ProjectWorkerPool {
     if (-not $scriptPath) { $scriptPath = $MyInvocation.MyCommand.Path }
     if (-not $scriptPath) { throw 'Unable to resolve current script path for worker pool launch.' }
 
-    Write-Log -Level INFO -Message ("[WorkerPool] Enabled | Workers={0} | Projects={1}" -f $workerCount,$TargetProjects.Count)
+    $effectiveWorkerCap = [Math]::Max(1,[Math]::Min(4,[int]$script:RecommendedMaxThreads))
+    if ($script:HostMemoryGb -le 16) { $effectiveWorkerCap = [Math]::Min($effectiveWorkerCap,3) }
+    if ($script:HostMemoryGb -le 8) { $effectiveWorkerCap = [Math]::Min($effectiveWorkerCap,2) }
+    Write-Log -Level INFO -Message ("[WorkerPool] Enabled | Workers={0} | Projects={1} | HostSafeCap={2}" -f $workerCount,$TargetProjects.Count,$effectiveWorkerCap)
 
     $workerRoot = Join-Path $RootOutputDir 'workers'
     $workerInputRoot = Join-Path $RootOutputDir 'worker-inputs'
@@ -741,6 +953,20 @@ function Invoke-ProjectWorkerPool {
         $bucketIdx = $i % $workerCount
         $buckets[$bucketIdx].Add([string]$TargetProjects[$i]) | Out-Null
     }
+
+    $bucketSizes = @($buckets | ForEach-Object { $_.Count })
+    $minProjectsPerWorker = 0
+    $maxProjectsPerWorker = 0
+    if ($bucketSizes.Count -gt 0) {
+        $minProjectsPerWorker = [int]($bucketSizes | Measure-Object -Minimum).Minimum
+        $maxProjectsPerWorker = [int]($bucketSizes | Measure-Object -Maximum).Maximum
+    }
+    $avgProjectsPerWorker = if ($workerCount -gt 0) {
+        [Math]::Round(([double]$TargetProjects.Count / [double]$workerCount),2,[System.MidpointRounding]::AwayFromZero)
+    } else {
+        0
+    }
+    Write-Log -Level INFO -Message ("[WorkerPool] Allocation | Workers={0} | Projects={1} | MinPerWorker={2} | MaxPerWorker={3} | AvgPerWorker={4}" -f $workerCount,$TargetProjects.Count,$minProjectsPerWorker,$maxProjectsPerWorker,$avgProjectsPerWorker)
 
     $workers = New-Object System.Collections.Generic.List[object]
     for ($w = 0; $w -lt $workerCount; $w++) {
@@ -758,7 +984,7 @@ function Invoke-ProjectWorkerPool {
         if ($ServiceAccount) { $argList += @('-ServiceAccount',"`"$ServiceAccount`"") }
         if ($AccessToken) { $argList += @('-AccessToken',"`"$AccessToken`"") }
         if ($Types -and $Types.Count -gt 0) {
-            foreach ($t in $Types) { $argList += @('-Types',$t) }
+            $argList += @('-Types',[string](@($Types) -join ','))
         }
         $argList += @('-ProjectsFile',"`"$inputFile`"")
         $argList += @('-OutputDir',"`"$workerOutDir`"")
@@ -782,20 +1008,97 @@ function Invoke-ProjectWorkerPool {
             Process = $proc
         }) | Out-Null
         Write-Log -Level INFO -Message ("[WorkerPool] Worker={0} Pid={1} Projects={2} First={3} Last={4}" -f $workerId,$proc.Id,$bucketProjects.Count,[string]$bucketProjects[0],[string]$bucketProjects[$bucketProjects.Count - 1])
+        Write-Log -Level INFO -Message ("[WorkerPool] Worker={0} LogHint={1}" -f $workerId,(Join-Path $workerOutDir 'gcp_sizing_script_output_*.log'))
     }
+
+    $workerDoneState = @{}
+    $workerProgressState = @{}
+    foreach ($w in $workers.ToArray()) {
+        $workerId = [int]$w.WorkerId
+        $workerDoneState[$workerId] = $false
+        $workerProgressState[$workerId] = [PSCustomObject]@{
+            LogPath = ''
+            Offset = 0L
+            CompletedProjects = 0
+            TotalProjects = [int]$w.ProjectsCount
+        }
+    }
+
+    $poolMonitorStart = Get-Date
+    $totalProjectsAllWorkers = [int]($workers | Measure-Object -Property ProjectsCount -Sum).Sum
+    Update-WorkerPoolProgress -CompletedWorkers 0 -TotalWorkers $workers.Count -RunningWorkers $workers.Count -CompletedProjects 0 -TotalProjects $totalProjectsAllWorkers -PerWorkerStatus '' -Elapsed ((Get-Date) - $poolMonitorStart)
 
     $lastHeartbeat = Get-Date
     while ($true) {
+        foreach ($w in $workers.ToArray()) {
+            $workerId = [int]$w.WorkerId
+            $progressState = $workerProgressState[$workerId]
+
+            $resolvedPath = Resolve-WorkerLogPath -WorkerOutputDir ([string]$w.OutputDir) -CurrentPath ([string]$progressState.LogPath)
+            if ($resolvedPath -and $resolvedPath -ne $progressState.LogPath) {
+                $progressState.LogPath = [string]$resolvedPath
+            }
+
+            if ($progressState.LogPath) {
+                $delta = Read-SharedFileDelta -Path ([string]$progressState.LogPath) -Offset ([long]$progressState.Offset)
+                $progressState.Offset = [long]$delta.Offset
+                foreach ($rawLine in @($delta.Lines)) {
+                    $line = [string]$rawLine
+                    if ($line -match '\[Progress\]\s+\d+%\s+\|\s+Completed=(?<done>\d+)/(?<total>\d+)') {
+                        $done = [int]$Matches['done']
+                        $total = [int]$Matches['total']
+                        if ($done -gt $progressState.CompletedProjects) { $progressState.CompletedProjects = $done }
+                        if ($total -gt 0) { $progressState.TotalProjects = $total }
+                    }
+                }
+            }
+
+            if ($workerDoneState[$workerId]) { continue }
+            if (-not $w.Process.HasExited) { continue }
+
+            $workerDoneState[$workerId] = $true
+            $exitCode = -1
+            try { $exitCode = [int]$w.Process.ExitCode } catch { $exitCode = -1 }
+
+            if ($exitCode -eq 0) {
+                $progressState.CompletedProjects = [Math]::Max([int]$progressState.CompletedProjects,[int]$progressState.TotalProjects)
+            }
+
+            $workerLog = Get-LatestFileByPattern -Directory ([string]$w.OutputDir) -Pattern 'gcp_sizing_script_output_*.log'
+            $workerLogHint = if ($workerLog) { $workerLog } else { (Join-Path ([string]$w.OutputDir) 'gcp_sizing_script_output_*.log') }
+
+            if ($exitCode -eq 0) {
+                Write-Log -Level INFO -Message ("[WorkerPool] Worker={0} completed | Projects={1} | First={2} | Last={3} | Log={4}" -f $workerId,[int]$w.ProjectsCount,[string]$w.FirstProject,[string]$w.LastProject,$workerLogHint)
+            } else {
+                Write-Log -Level WARN -Message ("[WorkerPool] Worker={0} failed ExitCode={1} | Projects={2} | First={3} | Last={4} | Log={5}" -f $workerId,$exitCode,[int]$w.ProjectsCount,[string]$w.FirstProject,[string]$w.LastProject,$workerLogHint)
+            }
+        }
+
         $running = @($workers | Where-Object { -not $_.Process.HasExited })
         $completed = $workers.Count - $running.Count
         $now = Get-Date
         if ($running.Count -eq 0 -or ($now - $lastHeartbeat).TotalSeconds -ge 15) {
-            Write-Log -Level INFO -Message ("[WorkerPool] Running={0}/{1} | Completed={2}/{1}" -f $running.Count,$workers.Count,$completed)
+            $perWorkerStatusList = New-Object System.Collections.Generic.List[string]
+            $projectsCompletedCumulative = 0
+            foreach ($wx in @($workers | Sort-Object WorkerId)) {
+                $wid = [int]$wx.WorkerId
+                $state = $workerProgressState[$wid]
+                $done = [int]$state.CompletedProjects
+                $total = [int]$state.TotalProjects
+                $projectsCompletedCumulative += $done
+                $perWorkerStatusList.Add(("W{0}:{1}/{2}" -f $wid,$done,$total)) | Out-Null
+            }
+            $perWorkerStatus = [string]::Join('; ',$perWorkerStatusList.ToArray())
+
+            Update-WorkerPoolProgress -CompletedWorkers $completed -TotalWorkers $workers.Count -RunningWorkers $running.Count -CompletedProjects $projectsCompletedCumulative -TotalProjects $totalProjectsAllWorkers -PerWorkerStatus $perWorkerStatus -Elapsed ($now - $poolMonitorStart)
+            Write-Log -Level INFO -Message ("[WorkerPool] Monitor | ProjectsCompleted={0}/{1} | WorkersCompleted={2}/{3} | Running={4} | PerWorker={5}" -f $projectsCompletedCumulative,$totalProjectsAllWorkers,$completed,$workers.Count,$running.Count,$perWorkerStatus)
             $lastHeartbeat = $now
         }
         if ($running.Count -eq 0) { break }
         Start-Sleep -Seconds 5
     }
+
+    Write-Progress -Id 2 -Activity 'GCP API Inventory Progress' -Completed
 
     $manifestRows = New-Object System.Collections.Generic.List[object]
     foreach ($w in @($workers | Sort-Object WorkerId)) {
@@ -859,6 +1162,7 @@ function Get-WorkloadFromMonitoringFilter {
     if ($f -match 'storage.googleapis.com/storage/total_bytes') { return 'StorageBucket' }
     if ($f -match 'kubernetes.io/persistentvolume/capacity_bytes') { return 'GKECluster' }
     if ($f -match 'spanner.googleapis.com/instance/storage/used_bytes') { return 'Database' }
+    if ($f -match 'bigtable.googleapis.com/disk/bytes_used') { return 'Database' }
     if ($f -match 'bigquery.googleapis.com/storage/logical_bytes|bigquery.googleapis.com/storage/stored_bytes') { return 'Database' }
     if ($f -match 'alloydb.googleapis.com/cluster/storage/usage') { return 'Database' }
 
@@ -872,6 +1176,7 @@ function Get-ComponentFromMonitoringFilter {
     $f = $Filter.ToLowerInvariant()
 
     if ($f -match 'spanner.googleapis.com/instance/storage/used_bytes') { return 'Spanner' }
+    if ($f -match 'bigtable.googleapis.com/disk/bytes_used') { return 'Bigtable' }
     if ($f -match 'bigquery.googleapis.com/storage/logical_bytes|bigquery.googleapis.com/storage/stored_bytes') { return 'BigQuery' }
     if ($f -match 'alloydb.googleapis.com/cluster/storage/usage') { return 'AlloyDB' }
     if ($f -match 'kubernetes.io/persistentvolume/capacity_bytes') { return 'GKE' }
@@ -997,6 +1302,88 @@ function Select-PreferredErrorRecord {
     return $best
 }
 
+function Get-FailedProjectsFromErrors {
+    param(
+        [Parameter(Mandatory)]$Errors,
+        [Parameter(Mandatory)][string[]]$AllProjects,
+        [string]$Workload,
+        [string[]]$Components,
+        [switch]$GroupByComponent
+    )
+
+    $projectSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in @($AllProjects)) {
+        if ($p) { [void]$projectSet.Add(([string]$p).Trim()) }
+    }
+
+    $filtered = @($Errors | Where-Object {
+        $proj = [string]$_.Project
+        if (-not $projectSet.Contains($proj)) { return $false }
+        if ($Workload -and [string]$_.Workload -ne $Workload) { return $false }
+        if ($Components -and $Components.Count -gt 0) {
+            $cmp = [string]$_.Component
+            if ($cmp -and ($Components -contains $cmp)) { return $true }
+            if (-not $cmp) { return $true }
+            return $false
+        }
+        return $true
+    })
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    if ($GroupByComponent) {
+        foreach ($g in @($filtered | Group-Object Project,Component | Sort-Object Name)) {
+            $best = Select-PreferredErrorRecord -Rows $g.Group
+            if ($null -eq $best) { continue }
+            $reason = [string]$best.ErrorCategory
+            if ($best.HttpStatusCode) { $reason = ("{0}({1})" -f $reason,[string]$best.HttpStatusCode) }
+            $rows.Add([PSCustomObject]@{
+                Project = [string]$best.Project
+                Reason = $reason
+                Component = [string]$best.Component
+                Message = Convert-ToCsvReasonText -Text ([string]$best.Message)
+            }) | Out-Null
+        }
+    } else {
+        foreach ($g in @($filtered | Group-Object Project | Sort-Object Name)) {
+            $best = Select-PreferredErrorRecord -Rows $g.Group
+            if ($null -eq $best) { continue }
+            $reason = [string]$best.ErrorCategory
+            if ($best.HttpStatusCode) { $reason = ("{0}({1})" -f $reason,[string]$best.HttpStatusCode) }
+            $rows.Add([PSCustomObject]@{
+                Project = [string]$best.Project
+                Reason = $reason
+                Component = [string]$best.Component
+                Message = Convert-ToCsvReasonText -Text ([string]$best.Message)
+            }) | Out-Null
+        }
+    }
+
+    return $rows.ToArray()
+}
+
+function Append-FailedProjectsSection {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$FailedRows,
+        [string]$NoneProject = 'None',
+        [string]$NoneReason = 'NoFailure',
+        [string]$NoneMessage = 'No failures detected'
+    )
+
+    Add-ContentSafe -Path $Path -Value ''
+    Add-ContentSafe -Path $Path -Value 'FailedProjects'
+    Add-ContentSafe -Path $Path -Value 'Project,Reason,Component,Message'
+
+    $arr = @($FailedRows)
+    if ($arr.Count -eq 0) {
+        Add-ContentSafe -Path $Path -Value ("{0},{1},,{2}" -f $NoneProject,$NoneReason,$NoneMessage)
+    } else {
+        foreach ($f in @($arr | Sort-Object Project,Component)) {
+            Add-ContentSafe -Path $Path -Value ("{0},{1},{2},{3}" -f $f.Project,$f.Reason,$f.Component,$f.Message)
+        }
+    }
+}
+
 function Write-DbWorkloadCsvWithSummary {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -1013,6 +1400,7 @@ function Write-DbWorkloadCsvWithSummary {
         switch ($WorkloadType) {
         'CloudSQL' { @('CloudSQL') }
         'SpannerInstance' { @('Spanner') }
+        'BigtableInstance' { @('Bigtable') }
         'BigQueryDataset' { @('BigQuery') }
         'AlloyDBCluster' { @('AlloyDB') }
         default { @() }
@@ -1044,33 +1432,37 @@ function Write-DbWorkloadCsvWithSummary {
         $copiedLines = Copy-FileContentStreaming -SourcePath $DetailCsvPath -DestinationPath $Path
         Write-Log -Level INFO -Message ("[DB-Finalize] Workload={0} | DetailLinesCopied={1} | File={2}" -f $WorkloadType,$copiedLines,(Split-Path $Path -Leaf))
     } else {
-        Add-ContentSafe -Path $Path -Value 'Type,Project,Name,Region,Zone,Engine,TierOrCapacity,StorageType,NodeCount,TableCount,State,StorageMB,StorageGB,Extra,Error'
+        Add-ContentSafe -Path $Path -Value 'Type,Project,Name,Region,Zone,Engine,TierOrCapacity,StorageType,NodeCount,TableCount,State,StorageMB,StorageGB,StorageTB,StoragePB,Extra,Error'
         Write-Log -Level WARN -Message ("[DB-Finalize] Workload={0} detail file missing. Writing header-only detail section for {1}." -f $WorkloadType,(Split-Path $Path -Leaf))
     }
 
     Add-ContentSafe -Path $Path -Value ''
     Add-ContentSafe -Path $Path -Value 'Summary'
-    $rowCount = [int]$WorkloadStats.RowCount
+    $recordCount = [int]$WorkloadStats.RowCount
     $totalMb = Convert-ToDecimal $WorkloadStats.TotalMb
     $totalGb = Convert-ToDecimal $WorkloadStats.TotalGb
-    Add-ContentSafe -Path $Path -Value ("Overall,{0},Rows,{1},TotalSizeMB,{2},TotalSizeGB,{3},TotalSizeTB,{4}" -f $WorkloadType,$rowCount,(Round-Decimal -Value $totalMb -Scale 6),(Round-Decimal -Value $totalGb -Scale 6),(Convert-GBToDecimalTB -GB $totalGb -Scale 6))
+    $overallSize = Get-SizeFacetsFromGB -GB $totalGb -Scale 6
+    Add-ContentSafe -Path $Path -Value ("Overall,{0},Count,{1},TotalSizeMB,{2},TotalSizeGB,{3},TotalSizeTB,{4},TotalSizePB,{5}" -f $WorkloadType,$recordCount,(Round-Decimal -Value $totalMb -Scale 6),$overallSize.GB,$overallSize.TB,$overallSize.PB)
 
     Add-ContentSafe -Path $Path -Value 'ProjectSummary'
-    Add-ContentSafe -Path $Path -Value 'Project,Rows,TotalSizeMB,TotalSizeGB,TotalSizeTB'
+    Add-ContentSafe -Path $Path -Value 'Project,Count,TotalSizeMB,TotalSizeGB,TotalSizeTB,TotalSizePB'
     foreach ($project in @($WorkloadStats.ProjectCount.Keys | Sort-Object)) {
         $pCount = Get-MapCount -Map $WorkloadStats.ProjectCount -Key $project
         $pMb = Get-MapDecimal -Map $WorkloadStats.ProjectMb -Key $project
         $pGb = Get-MapDecimal -Map $WorkloadStats.ProjectGb -Key $project
-        Add-ContentSafe -Path $Path -Value ("{0},{1},{2},{3},{4}" -f $project,$pCount,(Round-Decimal -Value $pMb -Scale 6),(Round-Decimal -Value $pGb -Scale 6),(Convert-GBToDecimalTB -GB $pGb -Scale 6))
+        $pSize = Get-SizeFacetsFromGB -GB $pGb -Scale 6
+        Add-ContentSafe -Path $Path -Value ("{0},{1},{2},{3},{4},{5}" -f $project,$pCount,(Round-Decimal -Value $pMb -Scale 6),$pSize.GB,$pSize.TB,$pSize.PB)
     }
 
+    Add-ContentSafe -Path $Path -Value ''
     Add-ContentSafe -Path $Path -Value 'RegionSummary'
-    Add-ContentSafe -Path $Path -Value 'Region,Rows,TotalSizeMB,TotalSizeGB,TotalSizeTB'
+    Add-ContentSafe -Path $Path -Value 'Region,Count,TotalSizeMB,TotalSizeGB,TotalSizeTB,TotalSizePB'
     foreach ($region in @($WorkloadStats.RegionCount.Keys | Sort-Object)) {
         $rCount = Get-MapCount -Map $WorkloadStats.RegionCount -Key $region
         $rMb = Get-MapDecimal -Map $WorkloadStats.RegionMb -Key $region
         $rGb = Get-MapDecimal -Map $WorkloadStats.RegionGb -Key $region
-        Add-ContentSafe -Path $Path -Value ("{0},{1},{2},{3},{4}" -f $region,$rCount,(Round-Decimal -Value $rMb -Scale 6),(Round-Decimal -Value $rGb -Scale 6),(Convert-GBToDecimalTB -GB $rGb -Scale 6))
+        $rSize = Get-SizeFacetsFromGB -GB $rGb -Scale 6
+        Add-ContentSafe -Path $Path -Value ("{0},{1},{2},{3},{4},{5}" -f $region,$rCount,(Round-Decimal -Value $rMb -Scale 6),$rSize.GB,$rSize.TB,$rSize.PB)
     }
 
     Add-ContentSafe -Path $Path -Value ''
@@ -1191,26 +1583,38 @@ function Get-MetadataAccessToken {
 
 function Get-GcpAccessToken {
     if ($AccessToken) {
+        $script:GcpTokenSource = 'CallerProvided'
         Write-Log -Level INFO -Message 'Using caller supplied access token.'
         return $AccessToken
     }
     if ($ServiceAccount) {
+        $script:GcpTokenSource = 'ServiceAccount'
         Write-Log -Level INFO -Message ("Acquiring token from service account key: {0}" -f $ServiceAccount)
         return (Get-ServiceAccountAccessToken -KeyFile $ServiceAccount)
     }
     if ($env:GOOGLE_OAUTH_ACCESS_TOKEN) {
+        $script:GcpTokenSource = 'EnvToken'
         Write-Log -Level INFO -Message 'Using GOOGLE_OAUTH_ACCESS_TOKEN from environment.'
         return [string]$env:GOOGLE_OAUTH_ACCESS_TOKEN
     }
     $metadataToken = Get-MetadataAccessToken
     if ($metadataToken) {
+        $script:GcpTokenSource = 'Metadata'
         Write-Log -Level INFO -Message 'Using metadata server access token.'
         return $metadataToken
     }
     throw 'No API auth source found. Provide -ServiceAccount or -AccessToken.'
 }
 
+$script:GcpTokenSource = ''
+$script:GcpTokenExpiryUtc = [datetime]::MinValue
+$script:GcpTokenLock = New-Object object
 $script:GcpAccessToken = Get-GcpAccessToken
+if ($script:GcpTokenSource -eq 'ServiceAccount') {
+    $script:GcpTokenExpiryUtc = (Get-Date).ToUniversalTime().AddMinutes(55)
+} elseif ($script:GcpTokenSource -eq 'Metadata') {
+    $script:GcpTokenExpiryUtc = (Get-Date).ToUniversalTime().AddMinutes(50)
+}
 
 # -------------------------
 # API core helpers
@@ -1256,6 +1660,63 @@ function Update-ApiAdaptiveDelay {
     }
 }
 
+function Refresh-GcpAccessToken {
+    param(
+        [switch]$Force,
+        [string]$Reason = 'AutoRefresh'
+    )
+
+    $refreshable = ($script:GcpTokenSource -eq 'ServiceAccount' -or $script:GcpTokenSource -eq 'Metadata')
+    if (-not $refreshable) { return $false }
+
+    [System.Threading.Monitor]::Enter($script:GcpTokenLock)
+    try {
+        $nowUtc = (Get-Date).ToUniversalTime()
+        if (-not $Force) {
+            if ($script:GcpTokenExpiryUtc -gt $nowUtc.AddMinutes(5)) {
+                return $true
+            }
+        }
+
+        if ($script:GcpTokenSource -eq 'ServiceAccount') {
+            $newToken = Get-ServiceAccountAccessToken -KeyFile $ServiceAccount
+            $script:GcpAccessToken = [string]$newToken
+            $script:GcpTokenExpiryUtc = (Get-Date).ToUniversalTime().AddMinutes(55)
+            return $true
+        }
+
+        if ($script:GcpTokenSource -eq 'Metadata') {
+            $newToken = Get-MetadataAccessToken
+            if ($newToken) {
+                $script:GcpAccessToken = [string]$newToken
+                $script:GcpTokenExpiryUtc = (Get-Date).ToUniversalTime().AddMinutes(50)
+                return $true
+            }
+            Write-Log -Level WARN -Message ("Access token refresh from metadata failed. Reason={0}" -f $Reason)
+            return $false
+        }
+    }
+    catch {
+        Write-Log -Level WARN -Message ("Access token refresh failed. Source={0} Reason={1} Error={2}" -f $script:GcpTokenSource,$Reason,$_.Exception.Message)
+        return $false
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:GcpTokenLock)
+    }
+
+    return $false
+}
+
+function Ensure-GcpAccessToken {
+    $refreshable = ($script:GcpTokenSource -eq 'ServiceAccount' -or $script:GcpTokenSource -eq 'Metadata')
+    if (-not $refreshable) { return }
+
+    $nowUtc = (Get-Date).ToUniversalTime()
+    if ($script:GcpTokenExpiryUtc -le $nowUtc.AddMinutes(5)) {
+        [void](Refresh-GcpAccessToken -Reason 'NearExpiry')
+    }
+}
+
 function Invoke-GcpApi {
     param(
         [Parameter(Mandatory)][string]$Uri,
@@ -1265,9 +1726,11 @@ function Invoke-GcpApi {
     )
 
     $attempt = 0
+    $refreshedAfterAuthFailure = $false
     while ($true) {
         $attempt++
         try {
+            Ensure-GcpAccessToken
             Apply-ApiAdaptiveDelay
             $headers = @{ Authorization = "Bearer $($script:GcpAccessToken)" }
             $script:ApiLastCallUtc = (Get-Date).ToUniversalTime()
@@ -1284,6 +1747,15 @@ function Invoke-GcpApi {
         catch {
             $statusCode = $null
             try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+
+            if ($statusCode -eq 401 -and -not $refreshedAfterAuthFailure) {
+                $refreshedAfterAuthFailure = Refresh-GcpAccessToken -Force -Reason '401'
+                if ($refreshedAfterAuthFailure) {
+                    Write-Log -Level WARN -Message ("Auth token refreshed after 401. Retrying uri={0}" -f $Uri)
+                    continue
+                }
+            }
+
             $retryable = ($statusCode -eq 429 -or ($statusCode -ge 500 -and $statusCode -lt 600))
             $statusForDelay = 0
             if ($statusCode) { $statusForDelay = [int]$statusCode }
@@ -1453,6 +1925,8 @@ function Get-ProjectVmInventoryApi {
                             VMId = [string]$i.id
                             DiskCount = $diskCount
                             VMDiskSizeGB = [decimal]0
+                            VMDiskSizeTB = [decimal]0
+                            VMDiskSizePB = [decimal]0
                         }) | Out-Null
                         $instanceMap[[string]$i.selfLink] = $i
                     }
@@ -1485,6 +1959,7 @@ function Get-ProjectVmInventoryApi {
                         $vmNames = @($users | ForEach-Object { ([string]$_ -split '/')[-1] })
                         $hasDiskEncKey = (($d.PSObject.Properties.Name -contains 'diskEncryptionKey') -and $null -ne $d.diskEncryptionKey)
                         $hasEncKey = (($d.PSObject.Properties.Name -contains 'encryptionKey') -and $null -ne $d.encryptionKey)
+                        $diskSize = Get-SizeFacetsFromGB -GB (Convert-ToDecimal $d.sizeGb) -Scale 6
                         $diskRow = [PSCustomObject]@{
                             DiskName = [string]$d.name
                             VMName = ($vmNames -join '|')
@@ -1494,7 +1969,9 @@ function Get-ProjectVmInventoryApi {
                             IsRegional = [bool]($null -ne $diskRegion)
                             Encrypted = if ($hasDiskEncKey -or $hasEncKey) { 'Yes' } else { 'No' }
                             DiskType = if ($d.type) { ([string]$d.type -split '/')[-1] } else { '' }
-                            SizeGB = [int64](Convert-ToDecimal $d.sizeGb)
+                            SizeGB = $diskSize.GB
+                            SizeTB = $diskSize.TB
+                            SizePB = $diskSize.PB
                             DiskSelfLink = $diskSelf
                         }
                         $diskBySelf[$diskSelf] = $diskRow
@@ -1529,7 +2006,10 @@ function Get-ProjectVmInventoryApi {
             }
         }
         $v.DiskCount = $cnt
-        $v.VMDiskSizeGB = Round-Decimal -Value $totalGb -Scale 6
+        $vmSize = Get-SizeFacetsFromGB -GB $totalGb -Scale 6
+        $v.VMDiskSizeGB = $vmSize.GB
+        $v.VMDiskSizeTB = $vmSize.TB
+        $v.VMDiskSizePB = $vmSize.PB
     }
 
     return [PSCustomObject]@{
@@ -1699,10 +2179,11 @@ function Get-ProjectFileShareInventoryApi {
                 $gib = Convert-ToDecimal (Get-OptionalPropertyValue -Object $share -Name 'capacityGb')
                 $gb = Round-Decimal -Value (($gib * [decimal]1073741824)/[decimal]1000000000) -Scale 6
                 $tb = Convert-GBToDecimalTB -GB $gb -Scale 6
+                $pb = Convert-GBToDecimalPB -GB $gb -Scale 6
                 $tib = Round-Decimal -Value ($gib/[decimal]1024) -Scale 6
                 $shareUsedBytes = Convert-ToDecimal (Get-OptionalPropertyValue -Object $share -Name 'usedBytes')
                 if ($shareUsedBytes -le 0) { $shareUsedBytes = $instanceUsedBytes }
-                $usedGb = Convert-BytesToDecimalGB -Bytes $shareUsedBytes -Scale 6
+                $usedSize = Get-SizeFacetsFromBytes -Bytes $shareUsedBytes -Scale 6
                 $rows.Add([PSCustomObject]@{
                     Project = $ProjectId
                     InstanceName = $instName
@@ -1713,9 +2194,14 @@ function Get-ProjectFileShareInventoryApi {
                     provisionedGb = $gb
                     provisionedGib = $gib
                     provisionedTb = $tb
+                    provisionedPb = $pb
                     provisionedTib = $tib
                     CapacityGB = $gib
-                    UsedCapacityGB = $usedGb
+                    CapacityTB = $tb
+                    CapacityPB = $pb
+                    UsedCapacityGB = $usedSize.GB
+                    UsedCapacityTB = $usedSize.TB
+                    UsedCapacityPB = $usedSize.PB
                     Networks = (($networks | ForEach-Object { [string](Get-OptionalPropertyValue -Object $_ -Name 'network') }) -join '|')
                     IPAddresses = (($networks | ForEach-Object { @((Get-OptionalPropertyValue -Object $_ -Name 'ipAddresses' -Default @())) }) -join '|')
                     State = [string](Get-OptionalPropertyValue -Object $inst -Name 'state')
@@ -1764,6 +2250,79 @@ function Get-BigQueryStorageMapMonitoring {
         if ($v -gt $map[$dataset]) { $map[$dataset] = $v }
     }
     return $map
+}
+
+function Get-BigtableStorageMapMonitoring {
+    param([Parameter(Mandatory)][string]$ProjectId)
+
+    $metricFilters = @(
+        'metric.type="bigtable.googleapis.com/disk/bytes_used"'
+    )
+
+    $series = @()
+    foreach ($filter in $metricFilters) {
+        $series = @(Get-MonitoringSeries -ProjectId $ProjectId -Filter $filter -LookbackHours $MetricLookbackHours)
+        if ($series.Count -gt 0) { break }
+    }
+
+    # Bigtable storage is emitted per cluster; keep max-per-cluster, then sum to instance total.
+    $clusterPeak = @{}
+    foreach ($s in @($series)) {
+        $instanceKey = ''
+        try { $instanceKey = [string]$s.resource.labels.instance } catch {}
+        if (-not $instanceKey) { try { $instanceKey = [string]$s.resource.labels.instance_id } catch {} }
+        if (-not $instanceKey) { try { $instanceKey = [string]$s.metric.labels.instance } catch {} }
+        if (-not $instanceKey) { try { $instanceKey = [string]$s.metric.labels.instance_id } catch {} }
+        if (-not $instanceKey) { continue }
+        if ($instanceKey.Contains('/')) { $instanceKey = ($instanceKey -split '/')[-1] }
+
+        $clusterKey = ''
+        try { $clusterKey = [string]$s.resource.labels.cluster } catch {}
+        if (-not $clusterKey) { try { $clusterKey = [string]$s.resource.labels.cluster_id } catch {} }
+        if (-not $clusterKey) { try { $clusterKey = [string]$s.metric.labels.cluster } catch {} }
+        if (-not $clusterKey) { try { $clusterKey = [string]$s.metric.labels.cluster_id } catch {} }
+        if ($clusterKey -and $clusterKey.Contains('/')) { $clusterKey = ($clusterKey -split '/')[-1] }
+        if (-not $clusterKey) { $clusterKey = 'unknown' }
+
+        $v = Get-TimeSeriesValue -Series $s
+        $k = ("{0}|{1}" -f $instanceKey,$clusterKey)
+        if (-not $clusterPeak.ContainsKey($k)) { $clusterPeak[$k] = [decimal]0 }
+        if ($v -gt $clusterPeak[$k]) { $clusterPeak[$k] = $v }
+    }
+
+    $instanceMap = @{}
+    foreach ($entry in @($clusterPeak.GetEnumerator())) {
+        $parts = [string]$entry.Key -split '\|',2
+        $instanceName = [string]$parts[0]
+        if (-not $instanceMap.ContainsKey($instanceName)) { $instanceMap[$instanceName] = [decimal]0 }
+        $instanceMap[$instanceName] = [decimal]$instanceMap[$instanceName] + (Convert-ToDecimal $entry.Value)
+    }
+
+    return $instanceMap
+}
+
+function Get-BigtableInstanceTableCount {
+    param(
+        [Parameter(Mandatory)][string]$ProjectId,
+        [Parameter(Mandatory)][string]$InstanceId
+    )
+
+    $count = 0
+    try {
+        $instanceIdEsc = [uri]::EscapeDataString($InstanceId)
+        $base = "https://bigtableadmin.googleapis.com/v2/projects/$ProjectId/instances/$instanceIdEsc/tables?pageSize=1000"
+        $token = $null
+        do {
+            $uri = if ($token) { "$base&pageToken=$([uri]::EscapeDataString($token))" } else { $base }
+            $resp = Invoke-GcpApi -Uri $uri
+            $count += @((Get-OptionalPropertyValue -Object $resp -Name 'tables' -Default @())).Count
+            $token = [string](Get-OptionalPropertyValue -Object $resp -Name 'nextPageToken')
+        } while ($token)
+    } catch {
+        Write-Log -Level WARN -Message ("[DB][Bigtable] table count failed for {0}:{1}: {2}" -f $ProjectId,$InstanceId,$_.Exception.Message)
+    }
+
+    return [int]$count
 }
 
 function Get-BigQueryDatasetTableCount {
@@ -1900,32 +2459,40 @@ function Get-ProjectDatabaseInventoryApi {
 
     # Cloud SQL
     try {
-        $sqlUri = "https://sqladmin.googleapis.com/sql/v1beta4/projects/$ProjectId/instances"
-        $sqlResp = Invoke-GcpApi -Uri $sqlUri
-        foreach ($i in @((Get-OptionalPropertyValue -Object $sqlResp -Name 'items' -Default @()))) {
-            $settings = Get-OptionalPropertyValue -Object $i -Name 'settings'
-            $diskGb = Convert-ToDecimal (Get-OptionalPropertyValue -Object $settings -Name 'dataDiskSizeGb')
-            $storageType = [string](Get-OptionalPropertyValue -Object $settings -Name 'dataDiskType')
-            $pubIps = @($i.ipAddresses | Where-Object { $_.type -eq 'PRIMARY' } | ForEach-Object { $_.ipAddress })
-            $privIps = @($i.ipAddresses | Where-Object { $_.type -eq 'PRIVATE' } | ForEach-Object { $_.ipAddress })
-            $rows.Add([PSCustomObject]@{
-                Type='CloudSQL'
-                Project=$ProjectId
-                Name=[string]$i.name
-                Region=[string]$i.region
-                Zone=[string](Get-OptionalPropertyValue -Object $i -Name 'gceZone')
-                Engine=[string]$i.databaseVersion
-                TierOrCapacity=[string](Get-OptionalPropertyValue -Object $settings -Name 'tier')
-                StorageType=$storageType
-                NodeCount=''
-                TableCount=''
-                State=[string]$i.state
-                StorageMB=(Convert-GBToDecimalMB -GB $diskGb -Scale 6)
-                StorageGB=(Round-Decimal -Value $diskGb -Scale 6)
-                Extra=("PrivateIPs={0};PublicIPs={1}" -f ($privIps -join '|'),($pubIps -join '|'))
-                Error=''
-            }) | Out-Null
-        }
+        $sqlBase = "https://sqladmin.googleapis.com/sql/v1beta4/projects/$ProjectId/instances?maxResults=500"
+        $sqlToken = $null
+        do {
+            $sqlUri = if ($sqlToken) { "$sqlBase&pageToken=$([uri]::EscapeDataString($sqlToken))" } else { $sqlBase }
+            $sqlResp = Invoke-GcpApi -Uri $sqlUri
+            foreach ($i in @((Get-OptionalPropertyValue -Object $sqlResp -Name 'items' -Default @()))) {
+                $settings = Get-OptionalPropertyValue -Object $i -Name 'settings'
+                $diskGb = Convert-ToDecimal (Get-OptionalPropertyValue -Object $settings -Name 'dataDiskSizeGb')
+                $sqlSize = Get-SizeFacetsFromGB -GB $diskGb -Scale 6
+                $storageType = [string](Get-OptionalPropertyValue -Object $settings -Name 'dataDiskType')
+                $pubIps = @($i.ipAddresses | Where-Object { $_.type -eq 'PRIMARY' } | ForEach-Object { $_.ipAddress })
+                $privIps = @($i.ipAddresses | Where-Object { $_.type -eq 'PRIVATE' } | ForEach-Object { $_.ipAddress })
+                $rows.Add([PSCustomObject]@{
+                    Type='CloudSQL'
+                    Project=$ProjectId
+                    Name=[string]$i.name
+                    Region=[string]$i.region
+                    Zone=[string](Get-OptionalPropertyValue -Object $i -Name 'gceZone')
+                    Engine=[string]$i.databaseVersion
+                    TierOrCapacity=[string](Get-OptionalPropertyValue -Object $settings -Name 'tier')
+                    StorageType=$storageType
+                    NodeCount=''
+                    TableCount=''
+                    State=[string]$i.state
+                    StorageMB=$sqlSize.MB
+                    StorageGB=$sqlSize.GB
+                    StorageTB=$sqlSize.TB
+                    StoragePB=$sqlSize.PB
+                    Extra=("PrivateIPs={0};PublicIPs={1}" -f ($privIps -join '|'),($pubIps -join '|'))
+                    Error=''
+                }) | Out-Null
+            }
+            $sqlToken = [string](Get-OptionalPropertyValue -Object $sqlResp -Name 'nextPageToken')
+        } while ($sqlToken)
     } catch {
         Write-Log -Level WARN -Message ("[DB][CloudSQL] Project={0} failed: {1}" -f $ProjectId,$_.Exception.Message)
     }
@@ -1941,6 +2508,7 @@ function Get-ProjectDatabaseInventoryApi {
             foreach ($s in @((Get-OptionalPropertyValue -Object $spResp -Name 'instances' -Default @()))) {
                 $instName = ([string]$s.name -split '/')[-1]
                 $bytes = if ($spannerMap.ContainsKey($instName)) { $spannerMap[$instName] } else { [decimal]0 }
+                $spSize = Get-SizeFacetsFromBytes -Bytes $bytes -Scale 6
                 $spConfig = [string]$s.config
                 $spRegion = $spConfig
                 if ($spConfig -match 'instanceConfigs/(.+)$') { $spRegion = $Matches[1] }
@@ -1964,8 +2532,10 @@ function Get-ProjectDatabaseInventoryApi {
                     NodeCount=$spNodeCountText
                     TableCount=''
                     State=[string]$s.state
-                    StorageMB=(Convert-BytesToDecimalMB -Bytes $bytes -Scale 6)
-                    StorageGB=(Convert-BytesToDecimalGB -Bytes $bytes -Scale 6)
+                    StorageMB=$spSize.MB
+                    StorageGB=$spSize.GB
+                    StorageTB=$spSize.TB
+                    StoragePB=$spSize.PB
                     Extra='MonitoringMetric=spanner.googleapis.com/instance/storage/used_bytes'
                     Error=''
                 }) | Out-Null
@@ -1974,6 +2544,102 @@ function Get-ProjectDatabaseInventoryApi {
         } while ($spToken)
     } catch {
         Write-Log -Level WARN -Message ("[DB][Spanner] Project={0} failed: {1}" -f $ProjectId,$_.Exception.Message)
+    }
+
+    # Bigtable instances (table count from Admin API; size from monitoring metric when available)
+    $bigtableMap = Get-BigtableStorageMapMonitoring -ProjectId $ProjectId
+    try {
+        $btBase = "https://bigtableadmin.googleapis.com/v2/projects/$ProjectId/instances"
+        $btToken = $null
+        do {
+            $uri = if ($btToken) { "$btBase&pageToken=$([uri]::EscapeDataString($btToken))" } else { $btBase }
+            $btResp = Invoke-GcpApi -Uri $uri
+            foreach ($inst in @((Get-OptionalPropertyValue -Object $btResp -Name 'instances' -Default @()))) {
+                $instFullName = [string](Get-OptionalPropertyValue -Object $inst -Name 'name')
+                $instName = if ($instFullName) { ($instFullName -split '/')[-1] } else { '' }
+                if (-not $instName) { continue }
+
+                $regionSet = @{}
+                $zoneSet = @{}
+                $storageTypeSet = @{}
+                $clusterCount = 0
+                $serveNodes = [decimal]0
+
+                try {
+                    $instNameEsc = [uri]::EscapeDataString($instName)
+                    $clusterBase = "https://bigtableadmin.googleapis.com/v2/projects/$ProjectId/instances/$instNameEsc/clusters"
+                    $clusterToken = $null
+                    do {
+                        $clusterUri = if ($clusterToken) { "$clusterBase&pageToken=$([uri]::EscapeDataString($clusterToken))" } else { $clusterBase }
+                        $clusterResp = Invoke-GcpApi -Uri $clusterUri
+                        foreach ($cluster in @((Get-OptionalPropertyValue -Object $clusterResp -Name 'clusters' -Default @()))) {
+                            $clusterCount++
+                            $serveNodes += Convert-ToDecimal (Get-OptionalPropertyValue -Object $cluster -Name 'serveNodes')
+
+                            $loc = [string](Get-OptionalPropertyValue -Object $cluster -Name 'location')
+                            if ($loc -match 'locations/([^/]+)$') { $loc = [string]$Matches[1] }
+                            if ($loc) {
+                                if ($loc -match '^[a-z]+-[a-z0-9]+[0-9]+-[a-z]$') {
+                                    $zoneSet[$loc] = $true
+                                    $regionSet[$loc.Substring(0,$loc.LastIndexOf('-'))] = $true
+                                } else {
+                                    $regionSet[$loc] = $true
+                                }
+                            }
+
+                            $storageType = [string](Get-OptionalPropertyValue -Object $cluster -Name 'defaultStorageType')
+                            if ($storageType) { $storageTypeSet[$storageType] = $true }
+                        }
+                        $clusterToken = [string](Get-OptionalPropertyValue -Object $clusterResp -Name 'nextPageToken')
+                    } while ($clusterToken)
+                } catch {
+                    Write-Log -Level WARN -Message ("[DB][Bigtable] cluster list failed for {0}:{1}: {2}" -f $ProjectId,$instName,$_.Exception.Message)
+                }
+
+                $bytes = if ($bigtableMap.ContainsKey($instName)) { $bigtableMap[$instName] } else { [decimal]0 }
+                $btSize = Get-SizeFacetsFromBytes -Bytes $bytes -Scale 6
+                $tableCount = Get-BigtableInstanceTableCount -ProjectId $ProjectId -InstanceId $instName
+                $nodeCountText = ''
+                if ($serveNodes -gt 0) { $nodeCountText = Format-WholeNumber -Value $serveNodes }
+
+                $regionText = ''
+                if ($regionSet.Count -gt 0) { $regionText = [string]::Join('|',@($regionSet.Keys | Sort-Object)) }
+                $zoneText = ''
+                if ($zoneSet.Count -gt 0) { $zoneText = [string]::Join('|',@($zoneSet.Keys | Sort-Object)) }
+                $storageTypeText = ''
+                if ($storageTypeSet.Count -gt 0) { $storageTypeText = [string]::Join('|',@($storageTypeSet.Keys | Sort-Object)) }
+
+                $displayName = [string](Get-OptionalPropertyValue -Object $inst -Name 'displayName')
+                $extraParts = New-Object System.Collections.Generic.List[string]
+                $extraParts.Add('MonitoringMetric=bigtable.googleapis.com/disk/bytes_used') | Out-Null
+                $extraParts.Add(("ClusterCount={0}" -f $clusterCount)) | Out-Null
+                if ($displayName) { $extraParts.Add(("DisplayName={0}" -f $displayName)) | Out-Null }
+                $extra = [string]::Join(';',@($extraParts.ToArray()))
+
+                $rows.Add([PSCustomObject]@{
+                    Type='BigtableInstance'
+                    Project=$ProjectId
+                    Name=$instName
+                    Region=$regionText
+                    Zone=$zoneText
+                    Engine='Bigtable'
+                    TierOrCapacity=[string](Get-OptionalPropertyValue -Object $inst -Name 'type')
+                    StorageType=$storageTypeText
+                    NodeCount=$nodeCountText
+                    TableCount=(Format-WholeNumber -Value $tableCount)
+                    State=[string](Get-OptionalPropertyValue -Object $inst -Name 'state')
+                    StorageMB=$btSize.MB
+                    StorageGB=$btSize.GB
+                    StorageTB=$btSize.TB
+                    StoragePB=$btSize.PB
+                    Extra=$extra
+                    Error=''
+                }) | Out-Null
+            }
+            $btToken = [string](Get-OptionalPropertyValue -Object $btResp -Name 'nextPageToken')
+        } while ($btToken)
+    } catch {
+        Write-Log -Level WARN -Message ("[DB][Bigtable] Project={0} failed: {1}" -f $ProjectId,$_.Exception.Message)
     }
 
     # BigQuery datasets (size from monitoring metric when available)
@@ -1988,6 +2654,7 @@ function Get-ProjectDatabaseInventoryApi {
                 $datasetId = [string]$d.datasetReference.datasetId
                 if (-not $datasetId) { continue }
                 $bytes = if ($bqMap.ContainsKey($datasetId)) { $bqMap[$datasetId] } else { [decimal]0 }
+                $bqSize = Get-SizeFacetsFromBytes -Bytes $bytes -Scale 6
                 $bqRegion = [string](Get-OptionalPropertyValue -Object $d -Name 'location' -Default '')
                 $tableCount = Get-BigQueryDatasetTableCount -ProjectId $ProjectId -DatasetId $datasetId
                 $rows.Add([PSCustomObject]@{
@@ -2002,8 +2669,10 @@ function Get-ProjectDatabaseInventoryApi {
                     NodeCount=''
                     TableCount=(Format-WholeNumber -Value $tableCount)
                     State=''
-                    StorageMB=(Convert-BytesToDecimalMB -Bytes $bytes -Scale 6)
-                    StorageGB=(Convert-BytesToDecimalGB -Bytes $bytes -Scale 6)
+                    StorageMB=$bqSize.MB
+                    StorageGB=$bqSize.GB
+                    StorageTB=$bqSize.TB
+                    StoragePB=$bqSize.PB
                     Extra='MonitoringMetric=bigquery.googleapis.com/storage/stored_bytes;BytesType=Logical'
                     Error=''
                 }) | Out-Null
@@ -2026,6 +2695,7 @@ function Get-ProjectDatabaseInventoryApi {
                 $alRegion = ''
                 if ([string]$c.name -match 'locations/([^/]+)/') { $alRegion = $Matches[1] }
                 $bytes = Get-AlloyClusterStorageBytes -ProjectId $ProjectId -ClusterId $clusterName -Region $alRegion
+                $alloySize = Get-SizeFacetsFromBytes -Bytes $bytes -Scale 6
                 $rows.Add([PSCustomObject]@{
                     Type='AlloyDBCluster'
                     Project=$ProjectId
@@ -2038,8 +2708,10 @@ function Get-ProjectDatabaseInventoryApi {
                     NodeCount=''
                     TableCount=''
                     State=[string]$c.state
-                    StorageMB=(Convert-BytesToDecimalMB -Bytes $bytes -Scale 6)
-                    StorageGB=(Convert-BytesToDecimalGB -Bytes $bytes -Scale 6)
+                    StorageMB=$alloySize.MB
+                    StorageGB=$alloySize.GB
+                    StorageTB=$alloySize.TB
+                    StoragePB=$alloySize.PB
                     Extra='MonitoringMetric=alloydb.googleapis.com/cluster/storage/usage'
                     Error=''
                 }) | Out-Null
@@ -2089,55 +2761,67 @@ function Get-ProjectGkeInventoryApi {
     $rows = New-Object System.Collections.Generic.List[object]
     $pvMapObj = Get-GkePvCapacityMapMonitoring -ProjectId $ProjectId
 
-    $base = "https://container.googleapis.com/v1/projects/$ProjectId/locations/-/clusters"
-    $resp = $null
-    try { $resp = Invoke-GcpApi -Uri $base } catch {
-        Write-Log -Level WARN -Message ("[GKE] Project={0} cluster list failed: {1}" -f $ProjectId,$_.Exception.Message)
-        return $rows.ToArray()
-    }
-
-    foreach ($c in @((Get-OptionalPropertyValue -Object $resp -Name 'clusters' -Default @()))) {
-        $clusterName = [string]$c.name
-        $location = [string]$c.location
-        $region = ''; $zone = ''
-        if ($location) {
-            if ($location.Split('-').Count -ge 3 -and $location -match '-[A-Za-z]$') { $zone = $location; $region = $location.Substring(0, $location.LastIndexOf('-')) }
-            else { $region = $location }
+    $base = "https://container.googleapis.com/v1/projects/$ProjectId/locations/-/clusters?pageSize=1000"
+    $token = $null
+    do {
+        $uri = if ($token) { "$base&pageToken=$([uri]::EscapeDataString($token))" } else { $base }
+        $resp = $null
+        try { $resp = Invoke-GcpApi -Uri $uri } catch {
+            Write-Log -Level WARN -Message ("[GKE] Project={0} cluster list failed: {1}" -f $ProjectId,$_.Exception.Message)
+            break
         }
 
-        $nodeCount = [int](Convert-ToDecimal $c.currentNodeCount)
+        foreach ($c in @((Get-OptionalPropertyValue -Object $resp -Name 'clusters' -Default @()))) {
+            $clusterName = [string]$c.name
+            $location = [string]$c.location
+            $region = ''; $zone = ''
+            if ($location) {
+                if ($location.Split('-').Count -ge 3 -and $location -match '-[A-Za-z]$') { $zone = $location; $region = $location.Substring(0, $location.LastIndexOf('-')) }
+                else { $region = $location }
+            }
 
-        $estimatedNodeDiskGb = [decimal]0
-        foreach ($np in @($c.nodePools)) {
-            $diskGb = Convert-ToDecimal $np.config.diskSizeGb
-            $poolNodes = Convert-ToDecimal $np.initialNodeCount
-            if ($poolNodes -le 0 -and $nodeCount -gt 0) { $poolNodes = $nodeCount }
-            $estimatedNodeDiskGb += ($diskGb * $poolNodes)
+            $nodeCount = [int](Convert-ToDecimal $c.currentNodeCount)
+
+            $estimatedNodeDiskGb = [decimal]0
+            foreach ($np in @($c.nodePools)) {
+                $diskGb = Convert-ToDecimal $np.config.diskSizeGb
+                $poolNodes = Convert-ToDecimal $np.initialNodeCount
+                if ($poolNodes -le 0 -and $nodeCount -gt 0) { $poolNodes = $nodeCount }
+                $estimatedNodeDiskGb += ($diskGb * $poolNodes)
+            }
+
+            $pvBytes = if ($pvMapObj.CapacityBytes.ContainsKey($clusterName)) { $pvMapObj.CapacityBytes[$clusterName] } else { [decimal]0 }
+            $pvCount = if ($pvMapObj.CountMap.ContainsKey($clusterName)) { [int]$pvMapObj.CountMap[$clusterName] } else { 0 }
+            $pvSize = Get-SizeFacetsFromBytes -Bytes $pvBytes -Scale 6
+            $nodeDiskSize = Get-SizeFacetsFromGB -GB $estimatedNodeDiskGb -Scale 6
+
+            $rows.Add([PSCustomObject]@{
+                Project = $ProjectId
+                ClusterName = $clusterName
+                Region = $region
+                Zone = $zone
+                Location = $location
+                KubernetesVer = [string]$c.currentMasterVersion
+                NodeCount = $nodeCount
+                EstimatedvCPU = [decimal]0
+                EstimatedMemGB = [decimal]0
+                PersistentVolumeCapacityGB = $pvSize.GB
+                PersistentVolumeCapacityTB = $pvSize.TB
+                PersistentVolumeCapacityPB = $pvSize.PB
+                PersistentVolumeCount = $pvCount
+                PersistentVolumeSource = if ($pvBytes -gt 0) { 'MonitoringAPI' } else { 'NotAvailable' }
+                ReleaseChannel = if ($c.releaseChannel) { [string]$c.releaseChannel.channel } else { '' }
+                Network = [string]$c.network
+                Subnetwork = [string]$c.subnetwork
+                Endpoint = [string]$c.endpoint
+                EstimatedNodeDiskGB = $nodeDiskSize.GB
+                EstimatedNodeDiskTB = $nodeDiskSize.TB
+                EstimatedNodeDiskPB = $nodeDiskSize.PB
+            }) | Out-Null
         }
 
-        $pvBytes = if ($pvMapObj.CapacityBytes.ContainsKey($clusterName)) { $pvMapObj.CapacityBytes[$clusterName] } else { [decimal]0 }
-        $pvCount = if ($pvMapObj.CountMap.ContainsKey($clusterName)) { [int]$pvMapObj.CountMap[$clusterName] } else { 0 }
-
-        $rows.Add([PSCustomObject]@{
-            Project = $ProjectId
-            ClusterName = $clusterName
-            Region = $region
-            Zone = $zone
-            Location = $location
-            KubernetesVer = [string]$c.currentMasterVersion
-            NodeCount = $nodeCount
-            EstimatedvCPU = [decimal]0
-            EstimatedMemGB = [decimal]0
-            PersistentVolumeCapacityGB = (Convert-BytesToDecimalGB -Bytes $pvBytes -Scale 6)
-            PersistentVolumeCount = $pvCount
-            PersistentVolumeSource = if ($pvBytes -gt 0) { 'MonitoringAPI' } else { 'NotAvailable' }
-            ReleaseChannel = if ($c.releaseChannel) { [string]$c.releaseChannel.channel } else { '' }
-            Network = [string]$c.network
-            Subnetwork = [string]$c.subnetwork
-            Endpoint = [string]$c.endpoint
-            EstimatedNodeDiskGB = (Round-Decimal -Value $estimatedNodeDiskGb -Scale 6)
-        }) | Out-Null
-    }
+        $token = [string](Get-OptionalPropertyValue -Object $resp -Name 'nextPageToken')
+    } while ($token)
 
     return $rows.ToArray()
 }
@@ -2162,27 +2846,29 @@ if ($autoLargeScale -and -not $PSBoundParameters.ContainsKey('MetricLookbackHour
 $scaleReason = if ($autoLargeScale) { 'ProjectCount>=200' } else { 'NormalScale' }
 Write-Log -Level INFO -Message ("[ScaleDetect] AutoLargeScale={0} | Reason={1} | LargeScaleFlag={2} | MetricLookbackHours={3}" -f $(if($autoLargeScale){'Y'}else{'N'}),$scaleReason,$LargeScaleMode,$MetricLookbackHours)
 
+$script:RunStart = Get-Date
+
 $useWorkerPool = ($EnableProjectWorkerPool -or ((-not $DisableProjectWorkerPool) -and ($LargeScaleMode -or $autoLargeScale)))
+$workerPoolEnabled = $false
+$poolResult = $null
 if ($useWorkerPool -and $targetProjects.Count -gt 1) {
     Write-Log -Level INFO -Message ("[ScaleDetect] WorkerPool=Enabled | EnableFlag={0} | DisableFlag={1} | ProjectWorkers={2}" -f $EnableProjectWorkerPool,$DisableProjectWorkerPool,$ProjectWorkers)
     $poolResult = Invoke-ProjectWorkerPool -TargetProjects $targetProjects -RootOutputDir $outDir
     if ($poolResult.FailedCount -gt 0) {
         throw ("Worker pool completed with {0} failed workers. Check manifest: {1}" -f $poolResult.FailedCount,$poolResult.ManifestPath)
     }
+    $workerPoolEnabled = $true
     Write-Log -Level INFO -Message ("Worker-pool inventory complete. Worker outputs are under: {0}" -f (Join-Path $outDir 'workers'))
-    Write-Host "`nInventory complete. Results in $outDir`n" -ForegroundColor Green
-    return
+} else {
+    Write-Log -Level INFO -Message ("[ScaleDetect] WorkerPool=Disabled | EnableFlag={0} | DisableFlag={1} | AutoLargeScale={2}" -f $EnableProjectWorkerPool,$DisableProjectWorkerPool,$autoLargeScale)
 }
-Write-Log -Level INFO -Message ("[ScaleDetect] WorkerPool=Disabled | EnableFlag={0} | DisableFlag={1} | AutoLargeScale={2}" -f $EnableProjectWorkerPool,$DisableProjectWorkerPool,$autoLargeScale)
 
-$script:RunStart = Get-Date
-
-$vmColumns = @('Project','VMName','VMSize','OS','Region','Zone','VMId','DiskCount','VMDiskSizeGB')
-$diskColumns = @('DiskName','VMName','Project','Region','Zone','IsRegional','Encrypted','DiskType','SizeGB','DiskSelfLink')
+$vmColumns = @('Project','VMName','VMSize','OS','Region','Zone','VMId','DiskCount','VMDiskSizeGB','VMDiskSizeTB','VMDiskSizePB')
+$diskColumns = @('DiskName','VMName','Project','Region','Zone','IsRegional','Encrypted','DiskType','SizeGB','SizeTB','SizePB','DiskSelfLink')
 $storageColumns = @('StorageBucket','Project','Location','Region','Zone','StorageClass','ObjectCount','UsedCapacityBytes','UsedCapacityMiB','UsedCapacityGiB','UsedCapacityTiB','UsedCapacityMBDec','UsedCapacityGB','UsedCapacityTB')
-$fileshareColumns = @('Project','InstanceName','ShareName','Tier','Region','Zone','provisionedGb','provisionedGib','provisionedTb','provisionedTib','CapacityGB','UsedCapacityGB','Networks','IPAddresses','State','CreateTime','Labels','Protocol','Error')
-$dbColumns = @('Type','Project','Name','Region','Zone','Engine','TierOrCapacity','StorageType','NodeCount','TableCount','State','StorageMB','StorageGB','Extra','Error')
-$gkeColumns = @('Project','ClusterName','Region','Zone','Location','KubernetesVer','NodeCount','EstimatedvCPU','EstimatedMemGB','PersistentVolumeCapacityGB','PersistentVolumeCount','PersistentVolumeSource','ReleaseChannel','Network','Subnetwork','Endpoint','EstimatedNodeDiskGB')
+$fileshareColumns = @('Project','InstanceName','ShareName','Tier','Region','Zone','provisionedGb','provisionedGib','provisionedTb','provisionedPb','provisionedTib','CapacityGB','CapacityTB','CapacityPB','UsedCapacityGB','UsedCapacityTB','UsedCapacityPB','Networks','IPAddresses','State','CreateTime','Labels','Protocol','Error')
+$dbColumns = @('Type','Project','Name','Region','Zone','Engine','TierOrCapacity','StorageType','NodeCount','TableCount','State','StorageMB','StorageGB','StorageTB','StoragePB','Extra','Error')
+$gkeColumns = @('Project','ClusterName','Region','Zone','Location','KubernetesVer','NodeCount','EstimatedvCPU','EstimatedMemGB','PersistentVolumeCapacityGB','PersistentVolumeCapacityTB','PersistentVolumeCapacityPB','PersistentVolumeCount','PersistentVolumeSource','ReleaseChannel','Network','Subnetwork','Endpoint','EstimatedNodeDiskGB','EstimatedNodeDiskTB','EstimatedNodeDiskPB')
 
 $csvPaths = @{}
 if ($selected.ContainsKey('VM')) {
@@ -2202,7 +2888,7 @@ if ($selected.ContainsKey('FILESHARE')) {
     Initialize-CsvFile -Path $csvPaths.Fileshare -Columns $fileshareColumns
 }
 
-$dbWorkloadTypes = @('CloudSQL','SpannerInstance','BigQueryDataset','AlloyDBCluster')
+$dbWorkloadTypes = @('CloudSQL','SpannerInstance','BigtableInstance','BigQueryDataset','AlloyDBCluster')
 $dbWorkloadDetailFiles = @{}
 $dbWorkloadStats = @{}
 if ($selected.ContainsKey('DB')) {
@@ -2287,6 +2973,233 @@ $stats = @{
     }
 }
 
+if ($workerPoolEnabled) {
+    Write-Log -Level INFO -Message '[WorkerPool] Consolidating worker outputs into top-level result CSVs.'
+
+    $workerManifestRows = @()
+    if ($poolResult -and $poolResult.ManifestPath -and (Test-Path -LiteralPath $poolResult.ManifestPath)) {
+        try {
+            $workerManifestRows = @(Import-Csv -Path $poolResult.ManifestPath)
+        } catch {
+            Write-Log -Level WARN -Message ("[WorkerPool] Failed to parse manifest {0}: {1}" -f $poolResult.ManifestPath,$_.Exception.Message)
+        }
+    }
+
+    if ($workerManifestRows.Count -eq 0) {
+        $workerRoot = Join-Path $outDir 'workers'
+        $fallbackRows = New-Object System.Collections.Generic.List[object]
+        foreach ($dir in @(Get-ChildItem -LiteralPath $workerRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $wid = 0
+            if ($dir.Name -match 'worker-(\d+)') { $wid = [int]$Matches[1] }
+            $fallbackRows.Add([PSCustomObject]@{ WorkerId = $wid; OutputDir = [string]$dir.FullName }) | Out-Null
+        }
+        $workerManifestRows = @($fallbackRows.ToArray())
+    }
+
+    foreach ($mw in @($workerManifestRows | Sort-Object @{ Expression = { [int](Get-OptionalPropertyValue -Object $_ -Name 'WorkerId' -Default 0) } })) {
+        $workerId = [int](Get-OptionalPropertyValue -Object $mw -Name 'WorkerId' -Default 0)
+        $workerOutDir = [string](Get-OptionalPropertyValue -Object $mw -Name 'OutputDir' -Default '')
+        if (-not $workerOutDir -or -not (Test-Path -LiteralPath $workerOutDir)) {
+            Write-Log -Level WARN -Message ("[WorkerPool] Worker={0} output directory missing: {1}" -f $workerId,$workerOutDir)
+            continue
+        }
+
+        if ($selected.ContainsKey('VM')) {
+            $vmFile = Get-LatestFileByPattern -Directory $workerOutDir -Pattern 'gcp_vm_instance_info_*.csv'
+            $attachedFile = Get-LatestFileByPattern -Directory $workerOutDir -Pattern 'gcp_disks_attached_to_vm_instances_*.csv'
+            $unattachedFile = Get-LatestFileByPattern -Directory $workerOutDir -Pattern 'gcp_disks_unattached_to_vm_instances_*.csv'
+
+            $vmRows = if ($vmFile) { @(Get-CsvDetailRowsFromMixedFile -Path $vmFile -Columns $vmColumns) } else { @() }
+            $attachedRows = if ($attachedFile) { @(Get-CsvDetailRowsFromMixedFile -Path $attachedFile -Columns $diskColumns) } else { @() }
+            $unattachedRows = if ($unattachedFile) { @(Get-CsvDetailRowsFromMixedFile -Path $unattachedFile -Columns $diskColumns) } else { @() }
+            if ($null -eq $vmRows) { $vmRows = @() }
+            if ($null -eq $attachedRows) { $attachedRows = @() }
+            if ($null -eq $unattachedRows) { $unattachedRows = @() }
+            $vmRows = @($vmRows)
+            $attachedRows = @($attachedRows)
+            $unattachedRows = @($unattachedRows)
+
+            Append-CsvRows -Path $csvPaths.Vm -Rows $vmRows -Columns $vmColumns -Context ("WorkerMerge|VM|W{0}" -f $workerId)
+            Append-CsvRows -Path $csvPaths.Attached -Rows $attachedRows -Columns $diskColumns -Context ("WorkerMerge|Attached|W{0}" -f $workerId)
+            Append-CsvRows -Path $csvPaths.Unattached -Rows $unattachedRows -Columns $diskColumns -Context ("WorkerMerge|Unattached|W{0}" -f $workerId)
+
+            foreach ($v in $vmRows) {
+                $rowProject = Normalize-Key -Key ([string]$v.Project)
+                $region = Normalize-Key -Key ([string]$v.Region)
+                $zone = Normalize-Key -Key ([string]$v.Zone)
+                $stats.VM.TotalCount++
+                Add-CountToMap -Map $stats.VM.ProjectCounts -Key $rowProject -Default 'Unknown'
+                Add-CountToMap -Map $stats.VM.RegionCounts -Key $region -Default 'Unknown'
+                $prKey = New-Key2 -A $rowProject -B $region
+                Add-CountToMap -Map $stats.VM.ProjectRegionCounts -Key $prKey -Default ''
+                $pzKey = New-Key2 -A $rowProject -B $zone
+                Add-CountToMap -Map $stats.VM.ProjectZoneCounts -Key $pzKey -Default ''
+                $stats.VM.ProjectZoneRegion[$pzKey] = $region
+            }
+
+            foreach ($d in $attachedRows) {
+                $rowProject = Normalize-Key -Key ([string]$d.Project)
+                $sizeGb = Convert-ToDecimal $d.SizeGB
+                $region = Normalize-Key -Key ([string]$d.Region)
+                $zone = Normalize-Key -Key ([string]$d.Zone)
+
+                $stats.Attached.TotalCount++
+                $stats.Attached.TotalGb += $sizeGb
+                Add-CountToMap -Map $stats.Attached.ProjectCounts -Key $rowProject -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Attached.ProjectGb -Key $rowProject -Increment $sizeGb -Default 'Unknown'
+                Add-CountToMap -Map $stats.Attached.RegionCounts -Key $region -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Attached.RegionGb -Key $region -Increment $sizeGb -Default 'Unknown'
+
+                $stats.VM.DiskGbTotal += $sizeGb
+                Add-DecimalToMap -Map $stats.VM.DiskGbByProject -Key $rowProject -Increment $sizeGb -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.VM.DiskGbByRegion -Key $region -Increment $sizeGb -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.VM.DiskGbByProjectRegion -Key (New-Key2 -A $rowProject -B $region) -Increment $sizeGb -Default ''
+                Add-DecimalToMap -Map $stats.VM.DiskGbByProjectZone -Key (New-Key2 -A $rowProject -B $zone) -Increment $sizeGb -Default ''
+            }
+
+            foreach ($d in $unattachedRows) {
+                $rowProject = Normalize-Key -Key ([string]$d.Project)
+                $sizeGb = Convert-ToDecimal $d.SizeGB
+                $region = Normalize-Key -Key ([string]$d.Region)
+                $stats.Unattached.TotalCount++
+                $stats.Unattached.TotalGb += $sizeGb
+                Add-CountToMap -Map $stats.Unattached.ProjectCounts -Key $rowProject -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Unattached.ProjectGb -Key $rowProject -Increment $sizeGb -Default 'Unknown'
+                Add-CountToMap -Map $stats.Unattached.RegionCounts -Key $region -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Unattached.RegionGb -Key $region -Increment $sizeGb -Default 'Unknown'
+            }
+
+            Write-Log -Level INFO -Message ("[WorkerPool][Consolidate] Worker={0} VM={1} Attached={2} Unattached={3}" -f $workerId,$vmRows.Count,$attachedRows.Count,$unattachedRows.Count)
+        }
+
+        if ($selected.ContainsKey('STORAGE')) {
+            $storageFile = Get-LatestFileByPattern -Directory $workerOutDir -Pattern 'gcp_storage_buckets_info_*.csv'
+            $bRows = if ($storageFile) { @(Get-CsvDetailRowsFromMixedFile -Path $storageFile -Columns $storageColumns) } else { @() }
+            if ($null -eq $bRows) { $bRows = @() }
+            $bRows = @($bRows)
+            Append-CsvRows -Path $csvPaths.Storage -Rows $bRows -Columns $storageColumns -Context ("WorkerMerge|Storage|W{0}" -f $workerId)
+
+            foreach ($b in $bRows) {
+                $rowProject = Normalize-Key -Key ([string]$b.Project)
+                $bytes = Convert-ToDecimal $b.UsedCapacityBytes
+                $objectCount = Convert-ToDecimal $b.ObjectCount
+                $region = Normalize-Key -Key ([string]$b.Region)
+                $stats.Storage.TotalCount++
+                $stats.Storage.TotalBytes += $bytes
+                $stats.Storage.TotalObjectCount += $objectCount
+                Add-CountToMap -Map $stats.Storage.ProjectCounts -Key $rowProject -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Storage.ProjectBytes -Key $rowProject -Increment $bytes -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Storage.ProjectObjectCount -Key $rowProject -Increment $objectCount -Default 'Unknown'
+                Add-CountToMap -Map $stats.Storage.RegionCounts -Key $region -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Storage.RegionBytes -Key $region -Increment $bytes -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Storage.RegionObjectCount -Key $region -Increment $objectCount -Default 'Unknown'
+            }
+
+            Write-Log -Level INFO -Message ("[WorkerPool][Consolidate] Worker={0} Storage={1}" -f $workerId,$bRows.Count)
+        }
+
+        if ($selected.ContainsKey('FILESHARE')) {
+            $fileshareFile = Get-LatestFileByPattern -Directory $workerOutDir -Pattern 'gcp_fileshares_info_*.csv'
+            $fRows = if ($fileshareFile) { @(Get-CsvDetailRowsFromMixedFile -Path $fileshareFile -Columns $fileshareColumns) } else { @() }
+            if ($null -eq $fRows) { $fRows = @() }
+            $fRows = @($fRows)
+            Append-CsvRows -Path $csvPaths.Fileshare -Rows $fRows -Columns $fileshareColumns -Context ("WorkerMerge|Fileshare|W{0}" -f $workerId)
+
+            foreach ($f in $fRows) {
+                $rowProject = Normalize-Key -Key ([string]$f.Project)
+                $gb = Convert-ToDecimal $f.provisionedGb
+                $usedGb = Convert-ToDecimal $f.UsedCapacityGB
+                $region = Normalize-Key -Key ([string]$f.Region)
+                $stats.Fileshare.TotalCount++
+                $stats.Fileshare.TotalGb += $gb
+                $stats.Fileshare.TotalUsedGb += $usedGb
+                Add-CountToMap -Map $stats.Fileshare.ProjectCounts -Key $rowProject -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Fileshare.ProjectGb -Key $rowProject -Increment $gb -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Fileshare.ProjectUsedGb -Key $rowProject -Increment $usedGb -Default 'Unknown'
+                Add-CountToMap -Map $stats.Fileshare.RegionCounts -Key $region -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Fileshare.RegionGb -Key $region -Increment $gb -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.Fileshare.RegionUsedGb -Key $region -Increment $usedGb -Default 'Unknown'
+            }
+
+            Write-Log -Level INFO -Message ("[WorkerPool][Consolidate] Worker={0} Fileshare={1}" -f $workerId,$fRows.Count)
+        }
+
+        if ($selected.ContainsKey('DB')) {
+            $dbFile = Get-LatestFileByPattern -Directory $workerOutDir -Pattern 'gcp_database_inventory_*.csv'
+            $dRows = if ($dbFile) { @(Get-CsvDetailRowsFromMixedFile -Path $dbFile -Columns $dbColumns) } else { @() }
+            if ($null -eq $dRows) { $dRows = @() }
+            $dRows = @($dRows)
+            Append-CsvRows -Path $csvPaths.Db -Rows $dRows -Columns $dbColumns -Context ("WorkerMerge|Database|W{0}" -f $workerId)
+
+            foreach ($wg in @($dRows | Group-Object Type)) {
+                $wType = [string]$wg.Name
+                if ($dbWorkloadDetailFiles.ContainsKey($wType)) {
+                    Append-CsvRows -Path $dbWorkloadDetailFiles[$wType] -Rows $wg.Group -Columns $dbColumns -Context ("WorkerMerge|DBWorkload:{0}|W{1}" -f $wType,$workerId)
+                }
+            }
+
+            foreach ($d in $dRows) {
+                $rowProject = Normalize-Key -Key ([string]$d.Project)
+                $mb = Convert-ToDecimal $d.StorageMB
+                $gb = Convert-ToDecimal $d.StorageGB
+                $region = Normalize-Key -Key ([string]$d.Region)
+                $stats.DB.RowCount++
+                $stats.DB.TotalMb += $mb
+                $stats.DB.TotalGb += $gb
+                Add-CountToMap -Map $stats.DB.ProjectCount -Key $rowProject -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.DB.ProjectMb -Key $rowProject -Increment $mb -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.DB.ProjectGb -Key $rowProject -Increment $gb -Default 'Unknown'
+                Add-CountToMap -Map $stats.DB.RegionCount -Key $region -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.DB.RegionMb -Key $region -Increment $mb -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.DB.RegionGb -Key $region -Increment $gb -Default 'Unknown'
+
+                $w = [string]$d.Type
+                if ($dbWorkloadStats.ContainsKey($w)) {
+                    $ws = $dbWorkloadStats[$w]
+                    $ws.RowCount++
+                    $ws.TotalMb += $mb
+                    $ws.TotalGb += $gb
+                    Add-CountToMap -Map $ws.ProjectCount -Key $rowProject -Default 'Unknown'
+                    Add-DecimalToMap -Map $ws.ProjectMb -Key $rowProject -Increment $mb -Default 'Unknown'
+                    Add-DecimalToMap -Map $ws.ProjectGb -Key $rowProject -Increment $gb -Default 'Unknown'
+                    Add-CountToMap -Map $ws.RegionCount -Key $region -Default 'Unknown'
+                    Add-DecimalToMap -Map $ws.RegionMb -Key $region -Increment $mb -Default 'Unknown'
+                    Add-DecimalToMap -Map $ws.RegionGb -Key $region -Increment $gb -Default 'Unknown'
+                }
+            }
+
+            Write-Log -Level INFO -Message ("[WorkerPool][Consolidate] Worker={0} DB={1}" -f $workerId,$dRows.Count)
+        }
+
+        if ($selected.ContainsKey('GKE')) {
+            $gkeFile = Get-LatestFileByPattern -Directory $workerOutDir -Pattern 'gcp_gke_clusters_*.csv'
+            $gRows = if ($gkeFile) { @(Get-CsvDetailRowsFromMixedFile -Path $gkeFile -Columns $gkeColumns) } else { @() }
+            if ($null -eq $gRows) { $gRows = @() }
+            $gRows = @($gRows)
+            Append-CsvRows -Path $csvPaths.Gke -Rows $gRows -Columns $gkeColumns -Context ("WorkerMerge|GKE|W{0}" -f $workerId)
+
+            foreach ($g in $gRows) {
+                $rowProject = Normalize-Key -Key ([string]$g.Project)
+                $region = Normalize-Key -Key ([string]$g.Region)
+                $pvGb = Convert-ToDecimal $g.PersistentVolumeCapacityGB
+                $nodeGb = Convert-ToDecimal $g.EstimatedNodeDiskGB
+                $stats.GKE.TotalCount++
+                $stats.GKE.TotalPvGb += $pvGb
+                $stats.GKE.TotalNodeGb += $nodeGb
+                Add-CountToMap -Map $stats.GKE.ProjectCounts -Key $rowProject -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.GKE.ProjectPvGb -Key $rowProject -Increment $pvGb -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.GKE.ProjectNodeGb -Key $rowProject -Increment $nodeGb -Default 'Unknown'
+                Add-CountToMap -Map $stats.GKE.RegionCounts -Key $region -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.GKE.RegionPvGb -Key $region -Increment $pvGb -Default 'Unknown'
+                Add-DecimalToMap -Map $stats.GKE.RegionNodeGb -Key $region -Increment $nodeGb -Default 'Unknown'
+            }
+
+            Write-Log -Level INFO -Message ("[WorkerPool][Consolidate] Worker={0} GKE={1}" -f $workerId,$gRows.Count)
+        }
+    }
+
+    Write-Log -Level INFO -Message '[WorkerPool] Consolidation complete. Proceeding with shared finalization.'
+} else {
 for ($projIndex = 0; $projIndex -lt $targetProjects.Count; $projIndex++) {
     $proj = [string]$targetProjects[$projIndex]
     $currentProjectNumber = $projIndex + 1
@@ -2301,8 +3214,8 @@ for ($projIndex = 0; $projIndex -lt $targetProjects.Count; $projIndex++) {
         try {
             $vmRes = Get-ProjectVmInventoryApi -ProjectId $proj
             $vmRows = @($vmRes.VMs)
-            $attachedOut = @($vmRes.AttachedDisks | Select-Object DiskName,VMName,Project,Region,Zone,IsRegional,Encrypted,DiskType,SizeGB,DiskSelfLink)
-            $unattachedOut = @($vmRes.UnattachedDisks | Select-Object DiskName,VMName,Project,Region,Zone,IsRegional,Encrypted,DiskType,SizeGB,DiskSelfLink)
+            $attachedOut = @($vmRes.AttachedDisks | Select-Object DiskName,VMName,Project,Region,Zone,IsRegional,Encrypted,DiskType,SizeGB,SizeTB,SizePB,DiskSelfLink)
+            $unattachedOut = @($vmRes.UnattachedDisks | Select-Object DiskName,VMName,Project,Region,Zone,IsRegional,Encrypted,DiskType,SizeGB,SizeTB,SizePB,DiskSelfLink)
 
             Append-CsvRows -Path $csvPaths.Vm -Rows $vmRows -Columns $vmColumns -Context ("VM|{0}" -f $proj)
             Append-CsvRows -Path $csvPaths.Attached -Rows $attachedOut -Columns $diskColumns -Context ("AttachedDisks|{0}" -f $proj)
@@ -2453,7 +3366,7 @@ for ($projIndex = 0; $projIndex -lt $targetProjects.Count; $projIndex++) {
                 }
             }
 
-            Write-Log -Level INFO -Message ("[DB] Project={0} Rows={1}" -f $proj,$dRows.Count)
+            Write-Log -Level INFO -Message ("[DB] Project={0} Count={1}" -f $proj,$dRows.Count)
         } catch {
             Write-Log -Level WARN -Message ("[DB] Project={0} failed: {1}" -f $proj,$_.Exception.Message)
         }
@@ -2489,83 +3402,123 @@ for ($projIndex = 0; $projIndex -lt $targetProjects.Count; $projIndex++) {
     Write-Log -Level INFO -Message ("[Project-End] {0}" -f $proj)
     Update-RunProgress -CompletedProjects $completedAfter -CurrentProjectNumber $currentProjectNumber -TotalProjects $targetProjects.Count -Project $proj -Stage 'ProjectComplete'
 }
+}
 
 Write-Progress -Id 1 -Activity 'GCP API Inventory Progress' -Completed
 
 # -------------------------
 # CSV output summaries / finalize
 # -------------------------
+$allErrorsForFinalize = @(Get-InventoryErrorRecordsFromLog -LogPath $script:LogFile)
+if ($workerPoolEnabled) {
+    $workerRoot = Join-Path $outDir 'workers'
+    $workerLogs = @(Get-ChildItem -LiteralPath $workerRoot -Filter 'gcp_sizing_script_output_*.log' -File -Recurse -ErrorAction SilentlyContinue)
+    foreach ($wlog in $workerLogs) {
+        $allErrorsForFinalize += @(Get-InventoryErrorRecordsFromLog -LogPath $wlog.FullName)
+    }
+
+    if ($allErrorsForFinalize.Count -gt 1) {
+        $seenErr = @{}
+        $deduped = New-Object System.Collections.Generic.List[object]
+        foreach ($err in $allErrorsForFinalize) {
+            $k = "{0}|{1}|{2}|{3}" -f [string]$err.Project,[string]$err.Workload,[string]$err.Component,[string]$err.Message
+            if (-not $seenErr.ContainsKey($k)) {
+                $seenErr[$k] = $true
+                $deduped.Add($err) | Out-Null
+            }
+        }
+        $allErrorsForFinalize = @($deduped.ToArray())
+    }
+
+    Write-Log -Level INFO -Message ("[WorkerPool] Finalize error records merged from worker logs: {0}" -f $allErrorsForFinalize.Count)
+}
+
 if ($selected.ContainsKey('VM')) {
     $vmTotalGb = Round-Decimal -Value $stats.VM.DiskGbTotal -Scale 6
+    $vmTotalSize = Get-SizeFacetsFromGB -GB $vmTotalGb -Scale 6
     Add-ContentSafe -Path $csvPaths.Vm -Value ''
     Add-ContentSafe -Path $csvPaths.Vm -Value '### VM Summary ###'
-    Add-ContentSafe -Path $csvPaths.Vm -Value ("TotalVMs,{0},TotalDiskGB,{1},TotalDiskTB,{2}" -f $stats.VM.TotalCount,$vmTotalGb,(Convert-GBToDecimalTB -GB $vmTotalGb -Scale 6))
+    Add-ContentSafe -Path $csvPaths.Vm -Value ("TotalVMs,{0},TotalDiskGB,{1},TotalDiskTB,{2},TotalDiskPB,{3}" -f $stats.VM.TotalCount,$vmTotalSize.GB,$vmTotalSize.TB,$vmTotalSize.PB)
 
     Add-ContentSafe -Path $csvPaths.Vm -Value ''
     Add-ContentSafe -Path $csvPaths.Vm -Value '### VM Project Summary ###'
-    Add-ContentSafe -Path $csvPaths.Vm -Value 'Project,VMCount,TotalDiskGB,TotalDiskTB'
+    Add-ContentSafe -Path $csvPaths.Vm -Value 'Project,VMCount,TotalDiskGB,TotalDiskTB,TotalDiskPB'
     foreach ($project in @($stats.VM.ProjectCounts.Keys | Sort-Object)) {
         $pCount = Get-MapCount -Map $stats.VM.ProjectCounts -Key $project
         $pGb = Get-MapDecimal -Map $stats.VM.DiskGbByProject -Key $project
-        Add-ContentSafe -Path $csvPaths.Vm -Value ("{0},{1},{2},{3}" -f $project,$pCount,(Round-Decimal -Value $pGb -Scale 6),(Convert-GBToDecimalTB -GB $pGb -Scale 6))
+        $pVmSize = Get-SizeFacetsFromGB -GB $pGb -Scale 6
+        Add-ContentSafe -Path $csvPaths.Vm -Value ("{0},{1},{2},{3},{4}" -f $project,$pCount,$pVmSize.GB,$pVmSize.TB,$pVmSize.PB)
     }
 
     Add-ContentSafe -Path $csvPaths.Vm -Value ''
     Add-ContentSafe -Path $csvPaths.Vm -Value '### VM Region Summary ###'
-    Add-ContentSafe -Path $csvPaths.Vm -Value 'Region,VMCount,TotalDiskGB,TotalDiskTB'
+    Add-ContentSafe -Path $csvPaths.Vm -Value 'Region,VMCount,TotalDiskGB,TotalDiskTB,TotalDiskPB'
     foreach ($region in @($stats.VM.RegionCounts.Keys | Sort-Object)) {
         $rCount = Get-MapCount -Map $stats.VM.RegionCounts -Key $region
         $rGb = Get-MapDecimal -Map $stats.VM.DiskGbByRegion -Key $region
-        Add-ContentSafe -Path $csvPaths.Vm -Value ("{0},{1},{2},{3}" -f $region,$rCount,(Round-Decimal -Value $rGb -Scale 6),(Convert-GBToDecimalTB -GB $rGb -Scale 6))
+        $rVmSize = Get-SizeFacetsFromGB -GB $rGb -Scale 6
+        Add-ContentSafe -Path $csvPaths.Vm -Value ("{0},{1},{2},{3},{4}" -f $region,$rCount,$rVmSize.GB,$rVmSize.TB,$rVmSize.PB)
     }
+
+    $vmMainFailedRows = @(Get-FailedProjectsFromErrors -Errors $allErrorsForFinalize -AllProjects $targetProjects -Workload 'VM')
+    Append-FailedProjectsSection -Path $csvPaths.Vm -FailedRows $vmMainFailedRows -NoneMessage 'No VM failures detected'
     Write-Log -Level INFO -Message ("VM CSV written: {0}" -f (Split-Path $csvPaths.Vm -Leaf))
 
     $attachedTotalGb = Round-Decimal -Value $stats.Attached.TotalGb -Scale 6
+    $attachedTotalSize = Get-SizeFacetsFromGB -GB $attachedTotalGb -Scale 6
     Add-ContentSafe -Path $csvPaths.Attached -Value ''
     Add-ContentSafe -Path $csvPaths.Attached -Value '### Attached Disk Summary ###'
-    Add-ContentSafe -Path $csvPaths.Attached -Value ("TotalAttachedDisks,{0},TotalSizeGB,{1},TotalSizeTB,{2}" -f $stats.Attached.TotalCount,$attachedTotalGb,(Convert-GBToDecimalTB -GB $attachedTotalGb -Scale 6))
+    Add-ContentSafe -Path $csvPaths.Attached -Value ("TotalAttachedDisks,{0},TotalSizeGB,{1},TotalSizeTB,{2},TotalSizePB,{3}" -f $stats.Attached.TotalCount,$attachedTotalSize.GB,$attachedTotalSize.TB,$attachedTotalSize.PB)
 
     Add-ContentSafe -Path $csvPaths.Attached -Value ''
     Add-ContentSafe -Path $csvPaths.Attached -Value '### Attached Disk Project Summary ###'
-    Add-ContentSafe -Path $csvPaths.Attached -Value 'Project,DiskCount,TotalSizeGB,TotalSizeTB'
+    Add-ContentSafe -Path $csvPaths.Attached -Value 'Project,DiskCount,TotalSizeGB,TotalSizeTB,TotalSizePB'
     foreach ($project in @($stats.Attached.ProjectCounts.Keys | Sort-Object)) {
         $pCount = Get-MapCount -Map $stats.Attached.ProjectCounts -Key $project
         $pGb = Get-MapDecimal -Map $stats.Attached.ProjectGb -Key $project
-        Add-ContentSafe -Path $csvPaths.Attached -Value ("{0},{1},{2},{3}" -f $project,$pCount,(Round-Decimal -Value $pGb -Scale 6),(Convert-GBToDecimalTB -GB $pGb -Scale 6))
+        $pAttachedSize = Get-SizeFacetsFromGB -GB $pGb -Scale 6
+        Add-ContentSafe -Path $csvPaths.Attached -Value ("{0},{1},{2},{3},{4}" -f $project,$pCount,$pAttachedSize.GB,$pAttachedSize.TB,$pAttachedSize.PB)
     }
 
     Add-ContentSafe -Path $csvPaths.Attached -Value ''
     Add-ContentSafe -Path $csvPaths.Attached -Value '### Attached Disk Region Summary ###'
-    Add-ContentSafe -Path $csvPaths.Attached -Value 'Region,DiskCount,TotalSizeGB,TotalSizeTB'
+    Add-ContentSafe -Path $csvPaths.Attached -Value 'Region,DiskCount,TotalSizeGB,TotalSizeTB,TotalSizePB'
     foreach ($region in @($stats.Attached.RegionCounts.Keys | Sort-Object)) {
         $rCount = Get-MapCount -Map $stats.Attached.RegionCounts -Key $region
         $rGb = Get-MapDecimal -Map $stats.Attached.RegionGb -Key $region
-        Add-ContentSafe -Path $csvPaths.Attached -Value ("{0},{1},{2},{3}" -f $region,$rCount,(Round-Decimal -Value $rGb -Scale 6),(Convert-GBToDecimalTB -GB $rGb -Scale 6))
+        $rAttachedSize = Get-SizeFacetsFromGB -GB $rGb -Scale 6
+        Add-ContentSafe -Path $csvPaths.Attached -Value ("{0},{1},{2},{3},{4}" -f $region,$rCount,$rAttachedSize.GB,$rAttachedSize.TB,$rAttachedSize.PB)
     }
+    $vmFailedRows = @(Get-FailedProjectsFromErrors -Errors $allErrorsForFinalize -AllProjects $targetProjects -Workload 'VM')
+    Append-FailedProjectsSection -Path $csvPaths.Attached -FailedRows $vmFailedRows -NoneMessage 'No VM/disk failures detected'
     Write-Log -Level INFO -Message ("Attached disk CSV written: {0}" -f (Split-Path $csvPaths.Attached -Leaf))
 
     $unattachedTotalGb = Round-Decimal -Value $stats.Unattached.TotalGb -Scale 6
+    $unattachedTotalSize = Get-SizeFacetsFromGB -GB $unattachedTotalGb -Scale 6
     Add-ContentSafe -Path $csvPaths.Unattached -Value ''
     Add-ContentSafe -Path $csvPaths.Unattached -Value '### Unattached Disk Summary ###'
-    Add-ContentSafe -Path $csvPaths.Unattached -Value ("TotalUnattachedDisks,{0},TotalSizeGB,{1},TotalSizeTB,{2}" -f $stats.Unattached.TotalCount,$unattachedTotalGb,(Convert-GBToDecimalTB -GB $unattachedTotalGb -Scale 6))
+    Add-ContentSafe -Path $csvPaths.Unattached -Value ("TotalUnattachedDisks,{0},TotalSizeGB,{1},TotalSizeTB,{2},TotalSizePB,{3}" -f $stats.Unattached.TotalCount,$unattachedTotalSize.GB,$unattachedTotalSize.TB,$unattachedTotalSize.PB)
 
     Add-ContentSafe -Path $csvPaths.Unattached -Value ''
     Add-ContentSafe -Path $csvPaths.Unattached -Value '### Unattached Disk Project Summary ###'
-    Add-ContentSafe -Path $csvPaths.Unattached -Value 'Project,DiskCount,TotalSizeGB,TotalSizeTB'
+    Add-ContentSafe -Path $csvPaths.Unattached -Value 'Project,DiskCount,TotalSizeGB,TotalSizeTB,TotalSizePB'
     foreach ($project in @($stats.Unattached.ProjectCounts.Keys | Sort-Object)) {
         $pCount = Get-MapCount -Map $stats.Unattached.ProjectCounts -Key $project
         $pGb = Get-MapDecimal -Map $stats.Unattached.ProjectGb -Key $project
-        Add-ContentSafe -Path $csvPaths.Unattached -Value ("{0},{1},{2},{3}" -f $project,$pCount,(Round-Decimal -Value $pGb -Scale 6),(Convert-GBToDecimalTB -GB $pGb -Scale 6))
+        $pUnattachedSize = Get-SizeFacetsFromGB -GB $pGb -Scale 6
+        Add-ContentSafe -Path $csvPaths.Unattached -Value ("{0},{1},{2},{3},{4}" -f $project,$pCount,$pUnattachedSize.GB,$pUnattachedSize.TB,$pUnattachedSize.PB)
     }
 
     Add-ContentSafe -Path $csvPaths.Unattached -Value ''
     Add-ContentSafe -Path $csvPaths.Unattached -Value '### Unattached Disk Region Summary ###'
-    Add-ContentSafe -Path $csvPaths.Unattached -Value 'Region,DiskCount,TotalSizeGB,TotalSizeTB'
+    Add-ContentSafe -Path $csvPaths.Unattached -Value 'Region,DiskCount,TotalSizeGB,TotalSizeTB,TotalSizePB'
     foreach ($region in @($stats.Unattached.RegionCounts.Keys | Sort-Object)) {
         $rCount = Get-MapCount -Map $stats.Unattached.RegionCounts -Key $region
         $rGb = Get-MapDecimal -Map $stats.Unattached.RegionGb -Key $region
-        Add-ContentSafe -Path $csvPaths.Unattached -Value ("{0},{1},{2},{3}" -f $region,$rCount,(Round-Decimal -Value $rGb -Scale 6),(Convert-GBToDecimalTB -GB $rGb -Scale 6))
+        $rUnattachedSize = Get-SizeFacetsFromGB -GB $rGb -Scale 6
+        Add-ContentSafe -Path $csvPaths.Unattached -Value ("{0},{1},{2},{3},{4}" -f $region,$rCount,$rUnattachedSize.GB,$rUnattachedSize.TB,$rUnattachedSize.PB)
     }
+    Append-FailedProjectsSection -Path $csvPaths.Unattached -FailedRows $vmFailedRows -NoneMessage 'No VM/disk failures detected'
     Write-Log -Level INFO -Message ("Unattached disk CSV written: {0}" -f (Split-Path $csvPaths.Unattached -Leaf))
 }
 
@@ -2594,44 +3547,82 @@ if ($selected.ContainsKey('STORAGE')) {
         $rObj = Get-MapDecimal -Map $stats.Storage.RegionObjectCount -Key $region
         Add-ContentSafe -Path $csvPaths.Storage -Value ("{0},{1},{2},{3},{4}" -f $region,$rCount,(Format-WholeNumber -Value $rObj),(Convert-BytesToDecimalGB -Bytes $rBytes -Scale 6),(Convert-BytesToDecimalTB -Bytes $rBytes -Scale 6))
     }
+
+    $storageFailedRows = @(Get-FailedProjectsFromErrors -Errors $allErrorsForFinalize -AllProjects $targetProjects -Workload 'StorageBucket')
+    Append-FailedProjectsSection -Path $csvPaths.Storage -FailedRows $storageFailedRows -NoneMessage 'No storage failures detected'
     Write-Log -Level INFO -Message ("Storage CSV written: {0}" -f (Split-Path $csvPaths.Storage -Leaf))
 }
 
 if ($selected.ContainsKey('FILESHARE')) {
     $totalFsGb = Round-Decimal -Value $stats.Fileshare.TotalGb -Scale 6
     $totalFsUsedGb = Round-Decimal -Value $stats.Fileshare.TotalUsedGb -Scale 6
+    $totalFsSize = Get-SizeFacetsFromGB -GB $totalFsGb -Scale 6
+    $totalFsUsedSize = Get-SizeFacetsFromGB -GB $totalFsUsedGb -Scale 6
     Add-ContentSafe -Path $csvPaths.Fileshare -Value ''
     Add-ContentSafe -Path $csvPaths.Fileshare -Value '### Fileshare Summary ###'
-    Add-ContentSafe -Path $csvPaths.Fileshare -Value ("TotalShares,{0},TotalSizeGB,{1},TotalSizeTB,{2},TotalUsedCapacityGB,{3},TotalUsedCapacityTB,{4}" -f $stats.Fileshare.TotalCount,$totalFsGb,(Convert-GBToDecimalTB -GB $totalFsGb -Scale 6),$totalFsUsedGb,(Convert-GBToDecimalTB -GB $totalFsUsedGb -Scale 6))
+    Add-ContentSafe -Path $csvPaths.Fileshare -Value ("TotalShares,{0},TotalSizeGB,{1},TotalSizeTB,{2},TotalSizePB,{3},TotalUsedCapacityGB,{4},TotalUsedCapacityTB,{5},TotalUsedCapacityPB,{6}" -f $stats.Fileshare.TotalCount,$totalFsSize.GB,$totalFsSize.TB,$totalFsSize.PB,$totalFsUsedSize.GB,$totalFsUsedSize.TB,$totalFsUsedSize.PB)
+
+    Add-ContentSafe -Path $csvPaths.Fileshare -Value ''
+    Add-ContentSafe -Path $csvPaths.Fileshare -Value '### Fileshare Project Summary ###'
+    Add-ContentSafe -Path $csvPaths.Fileshare -Value 'Project,ShareCount,TotalSizeGB,TotalSizeTB,TotalSizePB,TotalUsedCapacityGB,TotalUsedCapacityTB,TotalUsedCapacityPB'
+    foreach ($project in @($stats.Fileshare.ProjectCounts.Keys | Sort-Object)) {
+        $pCount = Get-MapCount -Map $stats.Fileshare.ProjectCounts -Key $project
+        $pGb = Get-MapDecimal -Map $stats.Fileshare.ProjectGb -Key $project
+        $pUsedGb = Get-MapDecimal -Map $stats.Fileshare.ProjectUsedGb -Key $project
+        $pSize = Get-SizeFacetsFromGB -GB $pGb -Scale 6
+        $pUsedSize = Get-SizeFacetsFromGB -GB $pUsedGb -Scale 6
+        Add-ContentSafe -Path $csvPaths.Fileshare -Value ("{0},{1},{2},{3},{4},{5},{6},{7}" -f $project,$pCount,$pSize.GB,$pSize.TB,$pSize.PB,$pUsedSize.GB,$pUsedSize.TB,$pUsedSize.PB)
+    }
+
+    Add-ContentSafe -Path $csvPaths.Fileshare -Value ''
+    Add-ContentSafe -Path $csvPaths.Fileshare -Value '### Fileshare Region Summary ###'
+    Add-ContentSafe -Path $csvPaths.Fileshare -Value 'Region,ShareCount,TotalSizeGB,TotalSizeTB,TotalSizePB,TotalUsedCapacityGB,TotalUsedCapacityTB,TotalUsedCapacityPB'
+    foreach ($region in @($stats.Fileshare.RegionCounts.Keys | Sort-Object)) {
+        $rCount = Get-MapCount -Map $stats.Fileshare.RegionCounts -Key $region
+        $rGb = Get-MapDecimal -Map $stats.Fileshare.RegionGb -Key $region
+        $rUsedGb = Get-MapDecimal -Map $stats.Fileshare.RegionUsedGb -Key $region
+        $rSize = Get-SizeFacetsFromGB -GB $rGb -Scale 6
+        $rUsedSize = Get-SizeFacetsFromGB -GB $rUsedGb -Scale 6
+        Add-ContentSafe -Path $csvPaths.Fileshare -Value ("{0},{1},{2},{3},{4},{5},{6},{7}" -f $region,$rCount,$rSize.GB,$rSize.TB,$rSize.PB,$rUsedSize.GB,$rUsedSize.TB,$rUsedSize.PB)
+    }
+
+    $fsFailedRows = @(Get-FailedProjectsFromErrors -Errors $allErrorsForFinalize -AllProjects $targetProjects -Workload 'Fileshare')
+    Append-FailedProjectsSection -Path $csvPaths.Fileshare -FailedRows $fsFailedRows -NoneMessage 'No fileshare failures detected'
     Write-Log -Level INFO -Message ("Fileshare CSV written: {0}" -f (Split-Path $csvPaths.Fileshare -Leaf))
 }
 
 if ($selected.ContainsKey('DB')) {
-    $dbErrors = @((Get-InventoryErrorRecordsFromLog -LogPath $script:LogFile) | Where-Object Workload -eq 'Database')
+    $dbErrors = @($allErrorsForFinalize | Where-Object Workload -eq 'Database')
+    $dbTotalSize = Get-SizeFacetsFromGB -GB $stats.DB.TotalGb -Scale 6
 
     Add-ContentSafe -Path $csvPaths.Db -Value ''
     Add-ContentSafe -Path $csvPaths.Db -Value '### Database Summary ###'
-    Add-ContentSafe -Path $csvPaths.Db -Value ("TotalRows,{0},TotalSizeMB,{1},TotalSizeGB,{2},TotalSizeTB,{3}" -f $stats.DB.RowCount,(Round-Decimal -Value $stats.DB.TotalMb -Scale 6),(Round-Decimal -Value $stats.DB.TotalGb -Scale 6),(Convert-GBToDecimalTB -GB $stats.DB.TotalGb -Scale 6))
+    Add-ContentSafe -Path $csvPaths.Db -Value ("TotalCount,{0},TotalSizeMB,{1},TotalSizeGB,{2},TotalSizeTB,{3},TotalSizePB,{4}" -f $stats.DB.RowCount,(Round-Decimal -Value $stats.DB.TotalMb -Scale 6),$dbTotalSize.GB,$dbTotalSize.TB,$dbTotalSize.PB)
 
     Add-ContentSafe -Path $csvPaths.Db -Value ''
     Add-ContentSafe -Path $csvPaths.Db -Value '### Database Project Summary ###'
-    Add-ContentSafe -Path $csvPaths.Db -Value 'Project,Rows,TotalSizeMB,TotalSizeGB,TotalSizeTB'
+    Add-ContentSafe -Path $csvPaths.Db -Value 'Project,Count,TotalSizeMB,TotalSizeGB,TotalSizeTB,TotalSizePB'
     foreach ($project in @($stats.DB.ProjectCount.Keys | Sort-Object)) {
         $pCount = Get-MapCount -Map $stats.DB.ProjectCount -Key $project
         $pMb = Get-MapDecimal -Map $stats.DB.ProjectMb -Key $project
         $pGb = Get-MapDecimal -Map $stats.DB.ProjectGb -Key $project
-        Add-ContentSafe -Path $csvPaths.Db -Value ("{0},{1},{2},{3},{4}" -f $project,$pCount,(Round-Decimal -Value $pMb -Scale 6),(Round-Decimal -Value $pGb -Scale 6),(Convert-GBToDecimalTB -GB $pGb -Scale 6))
+        $pDbSize = Get-SizeFacetsFromGB -GB $pGb -Scale 6
+        Add-ContentSafe -Path $csvPaths.Db -Value ("{0},{1},{2},{3},{4},{5}" -f $project,$pCount,(Round-Decimal -Value $pMb -Scale 6),$pDbSize.GB,$pDbSize.TB,$pDbSize.PB)
     }
 
     Add-ContentSafe -Path $csvPaths.Db -Value ''
     Add-ContentSafe -Path $csvPaths.Db -Value '### Database Region Summary ###'
-    Add-ContentSafe -Path $csvPaths.Db -Value 'Region,Rows,TotalSizeMB,TotalSizeGB,TotalSizeTB'
+    Add-ContentSafe -Path $csvPaths.Db -Value 'Region,Count,TotalSizeMB,TotalSizeGB,TotalSizeTB,TotalSizePB'
     foreach ($region in @($stats.DB.RegionCount.Keys | Sort-Object)) {
         $rCount = Get-MapCount -Map $stats.DB.RegionCount -Key $region
         $rMb = Get-MapDecimal -Map $stats.DB.RegionMb -Key $region
         $rGb = Get-MapDecimal -Map $stats.DB.RegionGb -Key $region
-        Add-ContentSafe -Path $csvPaths.Db -Value ("{0},{1},{2},{3},{4}" -f $region,$rCount,(Round-Decimal -Value $rMb -Scale 6),(Round-Decimal -Value $rGb -Scale 6),(Convert-GBToDecimalTB -GB $rGb -Scale 6))
+        $rDbSize = Get-SizeFacetsFromGB -GB $rGb -Scale 6
+        Add-ContentSafe -Path $csvPaths.Db -Value ("{0},{1},{2},{3},{4},{5}" -f $region,$rCount,(Round-Decimal -Value $rMb -Scale 6),$rDbSize.GB,$rDbSize.TB,$rDbSize.PB)
     }
+
+    $dbFailedRows = @(Get-FailedProjectsFromErrors -Errors $dbErrors -AllProjects $targetProjects -Workload 'Database' -Components @('CloudSQL','Spanner','Bigtable','BigQuery','AlloyDB') -GroupByComponent)
+    Append-FailedProjectsSection -Path $csvPaths.Db -FailedRows $dbFailedRows -NoneMessage 'No database workload failures detected'
     Write-Log -Level INFO -Message ("Database CSV written: {0}" -f (Split-Path $csvPaths.Db -Leaf))
 
     foreach ($w in $dbWorkloadTypes) {
@@ -2646,20 +3637,24 @@ if ($selected.ContainsKey('DB')) {
 if ($selected.ContainsKey('GKE')) {
     $pvGb = Round-Decimal -Value $stats.GKE.TotalPvGb -Scale 6
     $nodeGb = Round-Decimal -Value $stats.GKE.TotalNodeGb -Scale 6
+    $pvSize = Get-SizeFacetsFromGB -GB $pvGb -Scale 6
+    $nodeSize = Get-SizeFacetsFromGB -GB $nodeGb -Scale 6
     Add-ContentSafe -Path $csvPaths.Gke -Value ''
     Add-ContentSafe -Path $csvPaths.Gke -Value '### GKE Summary ###'
-    Add-ContentSafe -Path $csvPaths.Gke -Value ("TotalClusters,{0},TotalPVCapGB,{1},TotalEstimatedNodeDiskGB,{2}" -f $stats.GKE.TotalCount,$pvGb,$nodeGb)
+    Add-ContentSafe -Path $csvPaths.Gke -Value ("TotalClusters,{0},TotalPVCapGB,{1},TotalPVCapTB,{2},TotalPVCapPB,{3},TotalEstimatedNodeDiskGB,{4},TotalEstimatedNodeDiskTB,{5},TotalEstimatedNodeDiskPB,{6}" -f $stats.GKE.TotalCount,$pvSize.GB,$pvSize.TB,$pvSize.PB,$nodeSize.GB,$nodeSize.TB,$nodeSize.PB)
+    $gkeFailedRows = @(Get-FailedProjectsFromErrors -Errors $allErrorsForFinalize -AllProjects $targetProjects -Workload 'GKECluster')
+    Append-FailedProjectsSection -Path $csvPaths.Gke -FailedRows $gkeFailedRows -NoneMessage 'No GKE failures detected'
     Write-Log -Level INFO -Message ("GKE CSV written: {0}" -f (Split-Path $csvPaths.Gke -Leaf))
 }
 
 # -------------------------
 # Known-error extraction (from runtime log)
 # -------------------------
-$inventoryErrors = @(Get-InventoryErrorRecordsFromLog -LogPath $script:LogFile)
+$inventoryErrors = @($allErrorsForFinalize)
 if ($inventoryErrors.Count -gt 0) {
     $errCsv = Join-Path $outDir ("gcp_inventory_errors_" + $dateStr + ".csv")
     Write-PlainCsv -Data $inventoryErrors -Path $errCsv
-    Write-Log -Level INFO -Message ("Inventory error CSV written: {0} (rows={1})" -f (Split-Path $errCsv -Leaf),$inventoryErrors.Count)
+    Write-Log -Level INFO -Message ("Inventory error CSV written: {0} (count={1})" -f (Split-Path $errCsv -Leaf),$inventoryErrors.Count)
 }
 
 # -------------------------
@@ -2712,11 +3707,19 @@ if ($selected.ContainsKey('GKE')) {
 
 1..4 | ForEach-Object { $summaryRows.Add((New-BlankSummaryRow)) | Out-Null }
 
+$summaryRows.Add([PSCustomObject]@{ Level='Per project summary'; ResourceType='AllSelectedResources'; Project='All'; Region='All'; Zone='All'; Count=''; TotalSizeGB=''; TotalSizeTB=''; TotalSizeTiB='' }) | Out-Null
+
 foreach ($proj in $targetProjects) {
+    $projectHeaderAdded = $false
+
     if ($selected.ContainsKey('VM')) {
         $projCount = Get-MapCount -Map $stats.VM.ProjectCounts -Key $proj
         if ($projCount -gt 0) {
             $projGb = Get-MapDecimal -Map $stats.VM.DiskGbByProject -Key $proj
+            if (-not $projectHeaderAdded) {
+                $summaryRows.Add([PSCustomObject]@{ Level=("Project summary for project [{0}]" -f $proj); ResourceType=''; Project=''; Region=''; Zone=''; Count=''; TotalSizeGB=''; TotalSizeTB=''; TotalSizeTiB='' }) | Out-Null
+                $projectHeaderAdded = $true
+            }
             $summaryRows.Add([PSCustomObject]@{ Level='Project'; ResourceType='VM'; Project=$proj; Region='All'; Zone='All'; Count=$projCount; TotalSizeGB=(Round-Decimal -Value $projGb -Scale 6); TotalSizeTB=(Convert-GBToDecimalTB -GB $projGb -Scale 6); TotalSizeTiB=(Round-Decimal -Value ($projGb/[decimal]1024) -Scale 6) }) | Out-Null
         }
     }
@@ -2725,6 +3728,10 @@ foreach ($proj in $targetProjects) {
         $projCount = Get-MapCount -Map $stats.Storage.ProjectCounts -Key $proj
         if ($projCount -gt 0) {
             $projBytes = Get-MapDecimal -Map $stats.Storage.ProjectBytes -Key $proj
+            if (-not $projectHeaderAdded) {
+                $summaryRows.Add([PSCustomObject]@{ Level=("Project summary for project [{0}]" -f $proj); ResourceType=''; Project=''; Region=''; Zone=''; Count=''; TotalSizeGB=''; TotalSizeTB=''; TotalSizeTiB='' }) | Out-Null
+                $projectHeaderAdded = $true
+            }
             $summaryRows.Add([PSCustomObject]@{ Level='Project'; ResourceType='StorageBucket'; Project=$proj; Region='All'; Zone='All'; Count=$projCount; TotalSizeGB=(Convert-BytesToDecimalGB -Bytes $projBytes -Scale 6); TotalSizeTB=(Convert-BytesToDecimalTB -Bytes $projBytes -Scale 6); TotalSizeTiB=(Convert-BytesToTiB -Bytes $projBytes -Scale 6) }) | Out-Null
         }
     }
@@ -2733,6 +3740,10 @@ foreach ($proj in $targetProjects) {
         $projCount = Get-MapCount -Map $stats.Fileshare.ProjectCounts -Key $proj
         if ($projCount -gt 0) {
             $projFsGb = Get-MapDecimal -Map $stats.Fileshare.ProjectGb -Key $proj
+            if (-not $projectHeaderAdded) {
+                $summaryRows.Add([PSCustomObject]@{ Level=("Project summary for project [{0}]" -f $proj); ResourceType=''; Project=''; Region=''; Zone=''; Count=''; TotalSizeGB=''; TotalSizeTB=''; TotalSizeTiB='' }) | Out-Null
+                $projectHeaderAdded = $true
+            }
             $summaryRows.Add([PSCustomObject]@{ Level='Project'; ResourceType='Fileshare'; Project=$proj; Region='All'; Zone='All'; Count=$projCount; TotalSizeGB=(Round-Decimal -Value $projFsGb -Scale 6); TotalSizeTB=(Convert-GBToDecimalTB -GB $projFsGb -Scale 6); TotalSizeTiB=(Round-Decimal -Value ($projFsGb/[decimal]1024) -Scale 6) }) | Out-Null
         }
     }
@@ -2741,6 +3752,10 @@ foreach ($proj in $targetProjects) {
         $projCount = Get-MapCount -Map $stats.DB.ProjectCount -Key $proj
         if ($projCount -gt 0) {
             $projDbGb = Get-MapDecimal -Map $stats.DB.ProjectGb -Key $proj
+            if (-not $projectHeaderAdded) {
+                $summaryRows.Add([PSCustomObject]@{ Level=("Project summary for project [{0}]" -f $proj); ResourceType=''; Project=''; Region=''; Zone=''; Count=''; TotalSizeGB=''; TotalSizeTB=''; TotalSizeTiB='' }) | Out-Null
+                $projectHeaderAdded = $true
+            }
             $summaryRows.Add([PSCustomObject]@{ Level='Project'; ResourceType='Database'; Project=$proj; Region='All'; Zone='All'; Count=$projCount; TotalSizeGB=(Round-Decimal -Value $projDbGb -Scale 6); TotalSizeTB=(Convert-GBToDecimalTB -GB $projDbGb -Scale 6); TotalSizeTiB=(Round-Decimal -Value ($projDbGb/[decimal]1024) -Scale 6) }) | Out-Null
         }
     }
@@ -2751,12 +3766,22 @@ foreach ($proj in $targetProjects) {
             $projPv = Get-MapDecimal -Map $stats.GKE.ProjectPvGb -Key $proj
             $projNode = Get-MapDecimal -Map $stats.GKE.ProjectNodeGb -Key $proj
             $projGkeGb = Get-GkeEffectiveSizeFromSums -PvGb $projPv -NodeGb $projNode
+            if (-not $projectHeaderAdded) {
+                $summaryRows.Add([PSCustomObject]@{ Level=("Project summary for project [{0}]" -f $proj); ResourceType=''; Project=''; Region=''; Zone=''; Count=''; TotalSizeGB=''; TotalSizeTB=''; TotalSizeTiB='' }) | Out-Null
+                $projectHeaderAdded = $true
+            }
             $summaryRows.Add([PSCustomObject]@{ Level='Project'; ResourceType='GKECluster'; Project=$proj; Region='All'; Zone='All'; Count=$projCount; TotalSizeGB=(Round-Decimal -Value $projGkeGb -Scale 6); TotalSizeTB=(Convert-GBToDecimalTB -GB $projGkeGb -Scale 6); TotalSizeTiB=(Round-Decimal -Value ($projGkeGb/[decimal]1024) -Scale 6) }) | Out-Null
         }
+    }
+
+    if ($projectHeaderAdded) {
+        $summaryRows.Add((New-BlankSummaryRow)) | Out-Null
     }
 }
 
 1..4 | ForEach-Object { $summaryRows.Add((New-BlankSummaryRow)) | Out-Null }
+
+$summaryRows.Add([PSCustomObject]@{ Level='Region summary'; ResourceType='AllSelectedResources'; Project='All'; Region='All'; Zone='All'; Count=''; TotalSizeGB=''; TotalSizeTB=''; TotalSizeTiB='' }) | Out-Null
 
 if ($selected.ContainsKey('VM')) {
     foreach ($region in @($stats.VM.RegionCounts.Keys | Sort-Object)) {
@@ -2838,6 +3863,8 @@ if ($selected.ContainsKey('VM')) {
 if ($inventoryErrors.Count -gt 0) {
     1..4 | ForEach-Object { $summaryRows.Add((New-BlankSummaryRow)) | Out-Null }
 
+    $summaryRows.Add([PSCustomObject]@{ Level='Known error summary'; ResourceType='AllSelectedResources'; Project='All'; Region='All'; Zone='All'; Count=''; TotalSizeGB=''; TotalSizeTB=''; TotalSizeTiB='' }) | Out-Null
+
     $summaryRows.Add([PSCustomObject]@{ Level='KnownErrors'; ResourceType='AllKnownErrors'; Project='All'; Region='All'; Zone='All'; Count=$inventoryErrors.Count; TotalSizeGB=''; TotalSizeTB=''; TotalSizeTiB='' }) | Out-Null
 
     foreach ($eg in @($inventoryErrors | Group-Object ErrorCategory,Workload | Sort-Object Count -Descending)) {
@@ -2846,6 +3873,7 @@ if ($inventoryErrors.Count -gt 0) {
     }
 
     $summaryRows.Add((New-BlankSummaryRow)) | Out-Null
+    $summaryRows.Add([PSCustomObject]@{ Level='Project error summary'; ResourceType='AllSelectedResources'; Project='All'; Region='All'; Zone='All'; Count=''; TotalSizeGB=''; TotalSizeTB=''; TotalSizeTiB='' }) | Out-Null
     foreach ($pg in @($inventoryErrors | Group-Object Project,Workload | Sort-Object Count -Descending)) {
         $first = $pg.Group | Select-Object -First 1
         $topCategory = (($pg.Group | Group-Object ErrorCategory | Sort-Object Count -Descending | Select-Object -First 1).Name)
