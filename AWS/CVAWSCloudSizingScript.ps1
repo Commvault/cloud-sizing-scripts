@@ -122,6 +122,7 @@ param (
     [string]$RegionToQuery,
     [switch]$SkipBucketTags,
     [switch]$DebugBucketTags,
+    [switch]$EnableTagProcessing,
     [switch]$SelectiveZipping = $true,
     [ValidateSet(
         'EC2',
@@ -161,7 +162,7 @@ $script:ServiceRegistry = @{
         IdProperty = "InstanceId"
         StorageType = "EBS"
         ProcessorFunction = "Process-EC2Instance"
-        RequiresTagProcessing = $true
+        RequiresTagProcessing = $false
     }
     S3 = @{
         DisplayName = "Buckets"
@@ -171,7 +172,7 @@ $script:ServiceRegistry = @{
         IdProperty = "BucketName"
         StorageType = "Object"
         ProcessorFunction = "Process-S3Bucket"
-        RequiresTagProcessing = $true
+        RequiresTagProcessing = $false
         SpecialHandling = $true
     }
     EFS = @{
@@ -182,7 +183,7 @@ $script:ServiceRegistry = @{
         IdProperty = "FileSystemId"
         StorageType = "NFS"
         ProcessorFunction = "Process-EFSFileSystem"
-        RequiresTagProcessing = $true
+        RequiresTagProcessing = $false
     }
     FSX = @{
         DisplayName = "File Systems"
@@ -192,7 +193,7 @@ $script:ServiceRegistry = @{
         IdProperty = "FileSystemId"
         StorageType = "Managed"
         ProcessorFunction = "Process-FSXFileSystem"
-        RequiresTagProcessing = $true
+        RequiresTagProcessing = $false
         HasTypeBreakdown = $true
     }
     FSX_SVM = @{
@@ -203,7 +204,7 @@ $script:ServiceRegistry = @{
         IdProperty = "StorageVirtualMachineId"
         StorageType = "Metadata"
         ProcessorFunction = "Process-FSXStorageVirtualMachine"
-        RequiresTagProcessing = $true
+        RequiresTagProcessing = $false
         SpecialHandling = $true
     }
     EKS = @{
@@ -227,7 +228,7 @@ $script:ServiceRegistry = @{
         IdProperty = "VolumeId"
         StorageType = "EBS"
         ProcessorFunction = "Process-UnattachedVolume"
-        RequiresTagProcessing = $true
+        RequiresTagProcessing = $false
         Filter = @{Name='status';Values='available'}
     }
     RDS = @{
@@ -239,7 +240,7 @@ $script:ServiceRegistry = @{
         IdProperty = "DBInstanceIdentifier"
         StorageType = "Block"
         ProcessorFunction = "Process-RDSInstance"
-        RequiresTagProcessing = $true
+        RequiresTagProcessing = $false
     }
     DynamoDB = @{
         DisplayName = "Tables"
@@ -250,7 +251,7 @@ $script:ServiceRegistry = @{
         IdProperty = "TableName"
         StorageType = "NoSQL"
         ProcessorFunction = "Process-DynamoDBTable"
-        RequiresTagProcessing = $true
+        RequiresTagProcessing = $false
     }
     Redshift = @{
         DisplayName = "Clusters"
@@ -260,7 +261,7 @@ $script:ServiceRegistry = @{
         IdProperty = "ClusterIdentifier"
         StorageType = "Columnar"
         ProcessorFunction = "Process-RedshiftCluster"
-        RequiresTagProcessing = $true
+        RequiresTagProcessing = $false
         SpecialHandling = $true
     }
     DocumentDB = @{
@@ -272,7 +273,7 @@ $script:ServiceRegistry = @{
         IdProperty = "DBClusterIdentifier"
         StorageType = "Document"
         ProcessorFunction = "Process-DocumentDBCluster"
-        RequiresTagProcessing = $true
+        RequiresTagProcessing = $false
         SpecialHandling = $true
     }
 }
@@ -304,6 +305,18 @@ function Write-ScriptOutput {
     catch {
         Write-Host "[$timestamp] Warning: Failed to write to log file: $_" -ForegroundColor Yellow
     }
+}
+
+# Enable tag processing if customer explicitly requests it
+if ($EnableTagProcessing.IsPresent) {
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] EnableTagProcessing flag detected. Enabling tag fetching for all services." -ForegroundColor Green
+    foreach ($serviceName in $script:ServiceRegistry.Keys) {
+        if ($serviceName -ne "S3" -or -not $SkipBucketTags.IsPresent) {
+            $script:ServiceRegistry[$serviceName].RequiresTagProcessing = $true
+        }
+    }
+} else {
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Tag processing disabled by default (RequiresTagProcessing = false for all services). Use -EnableTagProcessing to enable tag fetching." -ForegroundColor Yellow
 }
 
 $script:EnabledServices = @{}
@@ -357,6 +370,7 @@ $script:Config = @{
     ProfileLocation = if ($ProfileLocation) { @{ProfileLocation = $ProfileLocation} } else { @{} }
     OutputPath = (Get-Location).Path
     SkipBucketTags = $SkipBucketTags.IsPresent
+    EnableTagProcessing = $EnableTagProcessing.IsPresent
     DebugBucketTags = $DebugBucketTags.IsPresent
 }
 
@@ -633,29 +647,33 @@ function Process-EC2Instance {
     }
 
     $instanceTags = @()
-    try {
-        $tagFilter = @{
-            Name = "resource-id"
-            Values = @($Item.InstanceId)
-        }
-        $tagResponse = Get-EC2Tag -Filter $tagFilter -Credential $Credential -Region $Region -ErrorAction Stop
-        $instanceTags = $tagResponse
-
-        if ($instanceTags -and $instanceTags.Count -gt 0) {
-            Write-ScriptOutput "Retrieved $($instanceTags.Count) tags for instance $($Item.InstanceId)" -Level Info
-        }
-    }
-    catch {
+    if ($script:ServiceRegistry["EC2"].RequiresTagProcessing) {
         try {
-            $instanceDetail = Get-EC2Instance -InstanceId $Item.InstanceId -Credential $Credential -Region $Region -ErrorAction Stop
-            if ($instanceDetail -and $instanceDetail.Instances -and $instanceDetail.Instances[0].Tags) {
-                $instanceTags = $instanceDetail.Instances[0].Tags
-                Write-ScriptOutput "Retrieved tags via instance detail for $($Item.InstanceId)" -Level Info
+            $tagFilter = @{
+                Name = "resource-id"
+                Values = @($Item.InstanceId)
+            }
+            $tagResponse = Get-EC2Tag -Filter $tagFilter -Credential $Credential -Region $Region -ErrorAction Stop
+            $instanceTags = $tagResponse
+
+            if ($instanceTags -and $instanceTags.Count -gt 0) {
+                Write-ScriptOutput "Retrieved $($instanceTags.Count) tags for instance $($Item.InstanceId)" -Level Info
             }
         }
         catch {
-            Write-ScriptOutput "Failed to get tags for instance $($Item.InstanceId): $($_.Exception.Message)" -Level Warning
+            try {
+                $instanceDetail = Get-EC2Instance -InstanceId $Item.InstanceId -Credential $Credential -Region $Region -ErrorAction Stop
+                if ($instanceDetail -and $instanceDetail.Instances -and $instanceDetail.Instances[0].Tags) {
+                    $instanceTags = $instanceDetail.Instances[0].Tags
+                    Write-ScriptOutput "Retrieved tags via instance detail for $($Item.InstanceId)" -Level Info
+                }
+            }
+            catch {
+                Write-ScriptOutput "Failed to get tags for instance $($Item.InstanceId): $($_.Exception.Message)" -Level Warning
+            }
         }
+    } else {
+        Write-ScriptOutput "Skipping tag fetch for EC2 instance $($Item.InstanceId) (RequiresTagProcessing = false)" -Level Info
     }
 
     $sizes = Convert-BytesToSizes -Bytes $totalEbsBytes
@@ -760,7 +778,7 @@ function Process-S3Bucket {
         }
 
         $bucketTags = @()
-        if (-not $script:Config.SkipBucketTags) {
+        if ($script:ServiceRegistry["S3"].RequiresTagProcessing -and -not $script:Config.SkipBucketTags) {
             try {
                 $taggingResponse = Get-S3BucketTagging -BucketName $bucketName -Credential $Credential -Region $actualRegion -ErrorAction Stop
                 $bucketTags = if ($taggingResponse.TagSet) { $taggingResponse.TagSet } elseif ($taggingResponse -is [array]) { $taggingResponse } else { $taggingResponse }
@@ -773,6 +791,14 @@ function Process-S3Bucket {
                 }
                 $bucketTags = @()
             }
+        } else {
+            $skipReason = if ($script:Config.SkipBucketTags) {
+                "SkipBucketTags = true"
+            } else {
+                "RequiresTagProcessing = false"
+            }
+
+            Write-ScriptOutput "Skipping tag fetch for S3 bucket $bucketName ($skipReason)" -Level Info
         }
 
         $sizes = Convert-BytesToSizes -Bytes $totalBytes
@@ -816,15 +842,19 @@ function Process-EFSFileSystem {
     $efsSizeBytes = Get-EFSFileSystemSize -EFS $Item -Credential $Credential -Region $Region
 
     $efsTags = @()
-    try {
-        if (Get-Command "Get-EFSResourceTag" -ErrorAction SilentlyContinue) {
-            $efsTags = Get-EFSResourceTag -ResourceId $Item.FileSystemArn -Credential $Credential -Region $Region -ErrorAction Stop
-        } else {
-            $efsTags = Get-EFSTag -FileSystemId $Item.FileSystemId -Credential $Credential -Region $Region -ErrorAction Stop -WarningAction SilentlyContinue
+    if ($script:ServiceRegistry["EFS"].RequiresTagProcessing) {
+        try {
+            if (Get-Command "Get-EFSResourceTag" -ErrorAction SilentlyContinue) {
+                $efsTags = Get-EFSResourceTag -ResourceId $Item.FileSystemArn -Credential $Credential -Region $Region -ErrorAction Stop
+            } else {
+                $efsTags = Get-EFSTag -FileSystemId $Item.FileSystemId -Credential $Credential -Region $Region -ErrorAction Stop -WarningAction SilentlyContinue
+            }
         }
-    }
-    catch {
-        Write-ScriptOutput "Failed to get tags for EFS $($Item.FileSystemId)" -Level Warning
+        catch {
+            Write-ScriptOutput "Failed to get tags for EFS $($Item.FileSystemId)" -Level Warning
+        }
+    } else {
+        Write-ScriptOutput "Skipping tag fetch for EFS $($Item.FileSystemId) (RequiresTagProcessing = false)" -Level Info
     }
 
     $sizes = Convert-BytesToSizes -Bytes $efsSizeBytes
@@ -864,29 +894,33 @@ function Process-FSXFileSystem {
     param($Item, $Credential, $Region, $AccountInfo, $AccountAlias)
 
     $fsxTags = @()
-    try {
-        if ($Item.ResourceARN -and $Item.ResourceARN.Trim() -ne "") {
-            if (Get-Command "Get-FSXResourceTag" -ErrorAction SilentlyContinue) {
-                $fsxTags = Get-FSXResourceTag -ResourceArn $Item.ResourceARN -Credential $Credential -Region $Region -ErrorAction Stop
-                Write-ScriptOutput "Retrieved $($fsxTags.Count) tags for FSx $($Item.FileSystemId) via ResourceTag API" -Level Info
-            } else {
-                Write-ScriptOutput "Get-FSXResourceTag command not available for FSx $($Item.FileSystemId)" -Level Warning
-            }
-        } else {
-            Write-ScriptOutput "No ResourceARN available for FSx $($Item.FileSystemId), skipping tag retrieval" -Level Warning
-        }
-    }
-    catch {
-        Write-ScriptOutput "Failed to get tags for FSx $($Item.FileSystemId): $($_.Exception.Message)" -Level Warning
+    if ($script:ServiceRegistry["FSX"].RequiresTagProcessing) {
         try {
-            if ($Item.Tags -and $Item.Tags.Count -gt 0) {
-                $fsxTags = $Item.Tags
-                Write-ScriptOutput "Retrieved $($fsxTags.Count) tags for FSx $($Item.FileSystemId) from item properties" -Level Info
+            if ($Item.ResourceARN -and $Item.ResourceARN.Trim() -ne "") {
+                if (Get-Command "Get-FSXResourceTag" -ErrorAction SilentlyContinue) {
+                    $fsxTags = Get-FSXResourceTag -ResourceArn $Item.ResourceARN -Credential $Credential -Region $Region -ErrorAction Stop
+                    Write-ScriptOutput "Retrieved $($fsxTags.Count) tags for FSx $($Item.FileSystemId) via ResourceTag API" -Level Info
+                } else {
+                    Write-ScriptOutput "Get-FSXResourceTag command not available for FSx $($Item.FileSystemId)" -Level Warning
+                }
+            } else {
+                Write-ScriptOutput "No ResourceARN available for FSx $($Item.FileSystemId), skipping tag retrieval" -Level Warning
             }
         }
         catch {
-            Write-ScriptOutput "Alternative tag retrieval also failed for FSx $($Item.FileSystemId)" -Level Warning
+            Write-ScriptOutput "Failed to get tags for FSx $($Item.FileSystemId): $($_.Exception.Message)" -Level Warning
+            try {
+                if ($Item.Tags -and $Item.Tags.Count -gt 0) {
+                    $fsxTags = $Item.Tags
+                    Write-ScriptOutput "Retrieved $($fsxTags.Count) tags for FSx $($Item.FileSystemId) from item properties" -Level Info
+                }
+            }
+            catch {
+                Write-ScriptOutput "Alternative tag retrieval also failed for FSx $($Item.FileSystemId)" -Level Warning
+            }
         }
+    } else {
+        Write-ScriptOutput "Skipping tag fetch for FSx $($Item.FileSystemId) (RequiresTagProcessing = false)" -Level Info
     }
 
     $capacityBytes = $Item.StorageCapacity * 1GB
@@ -941,13 +975,17 @@ function Process-FSXStorageVirtualMachine {
         }
 
         $svmTags = @()
-        try {
-            if ($Item.ResourceARN -and (Get-Command Get-FSXResourceTag -ErrorAction SilentlyContinue)) {
-                $svmTags = Get-FSXResourceTag -ResourceArn $Item.ResourceARN -Credential $Credential -Region $Region -ErrorAction SilentlyContinue
-            } elseif ($Item.Tags) {
-                $svmTags = $Item.Tags
-            }
-        } catch {}
+        if ($script:ServiceRegistry["FSX_SVM"].RequiresTagProcessing) {
+            try {
+                if ($Item.ResourceARN -and (Get-Command Get-FSXResourceTag -ErrorAction SilentlyContinue)) {
+                    $svmTags = Get-FSXResourceTag -ResourceArn $Item.ResourceARN -Credential $Credential -Region $Region -ErrorAction SilentlyContinue
+                } elseif ($Item.Tags) {
+                    $svmTags = $Item.Tags
+                }
+            } catch {}
+        } else {
+            Write-ScriptOutput "Skipping tag fetch for FSx SVM $svmId (RequiresTagProcessing = false)" -Level Info
+        }
 
         $volumes = @()
         try {
@@ -1320,29 +1358,33 @@ function Process-UnattachedVolume {
     param($Item, $Credential, $Region, $AccountInfo, $AccountAlias)
 
     $volumeTags = @()
-    try {
-        $tagFilter = @{
-            Name = "resource-id"
-            Values = @($Item.VolumeId)
-        }
-        $tagResponse = Get-EC2Tag -Filter $tagFilter -Credential $Credential -Region $Region -ErrorAction Stop
-        $volumeTags = $tagResponse
-
-        if ($volumeTags -and $volumeTags.Count -gt 0) {
-            Write-ScriptOutput "Retrieved $($volumeTags.Count) tags for volume $($Item.VolumeId)" -Level Info
-        }
-    }
-    catch {
+    if ($script:ServiceRegistry["UnattachedVolumes"].RequiresTagProcessing) {
         try {
-            $volumeDetail = Get-EC2Volume -VolumeId $Item.VolumeId -Credential $Credential -Region $Region -ErrorAction Stop
-            if ($volumeDetail -and $volumeDetail.Tags) {
-                $volumeTags = $volumeDetail.Tags
-                Write-ScriptOutput "Retrieved tags via volume detail for $($Item.VolumeId)" -Level Info
+            $tagFilter = @{
+                Name = "resource-id"
+                Values = @($Item.VolumeId)
+            }
+            $tagResponse = Get-EC2Tag -Filter $tagFilter -Credential $Credential -Region $Region -ErrorAction Stop
+            $volumeTags = $tagResponse
+
+            if ($volumeTags -and $volumeTags.Count -gt 0) {
+                Write-ScriptOutput "Retrieved $($volumeTags.Count) tags for volume $($Item.VolumeId)" -Level Info
             }
         }
         catch {
-            Write-ScriptOutput "Failed to get tags for volume $($Item.VolumeId): $($_.Exception.Message)" -Level Warning
+            try {
+                $volumeDetail = Get-EC2Volume -VolumeId $Item.VolumeId -Credential $Credential -Region $Region -ErrorAction Stop
+                if ($volumeDetail -and $volumeDetail.Tags) {
+                    $volumeTags = $volumeDetail.Tags
+                    Write-ScriptOutput "Retrieved tags via volume detail for $($Item.VolumeId)" -Level Info
+                }
+            }
+            catch {
+                Write-ScriptOutput "Failed to get tags for volume $($Item.VolumeId): $($_.Exception.Message)" -Level Warning
+            }
         }
+    } else {
+        Write-ScriptOutput "Skipping tag fetch for volume $($Item.VolumeId) (RequiresTagProcessing = false)" -Level Info
     }
 
     $volumeBytes = $Item.Size * 1GB
@@ -1443,9 +1485,13 @@ function Process-RDSInstance {
         }
 
         try {
-            if (Get-Command Get-RDSTag -ErrorAction SilentlyContinue) {
-                $tags = Get-RDSTag -ResourceName $Item.DBInstanceArn -Credential $Credential -Region $Region -ErrorAction Stop
-                Add-TagProperties -Object $rdsObj -Tags $tags
+            if ($script:ServiceRegistry["RDS"].RequiresTagProcessing) {
+                if (Get-Command Get-RDSTag -ErrorAction SilentlyContinue) {
+                    $tags = Get-RDSTag -ResourceName $Item.DBInstanceArn -Credential $Credential -Region $Region -ErrorAction Stop
+                    Add-TagProperties -Object $rdsObj -Tags $tags
+                }
+            } else {
+                Write-ScriptOutput "Skipping tag fetch for RDS $($Item.DBInstanceIdentifier) (RequiresTagProcessing = false)" -Level Info
             }
         } catch { }
 
@@ -1534,9 +1580,13 @@ function Process-DocumentDBCluster {
         }
 
         try {
-            if ($Item.DBClusterArn -and (Get-Command Get-RDSTag -ErrorAction SilentlyContinue)) {
-                $tags = Get-RDSTag -ResourceName $Item.DBClusterArn -Credential $Credential -Region $Region -ErrorAction Stop
-                Add-TagProperties -Object $docdbClusterObj -Tags $tags
+            if ($script:ServiceRegistry["DocumentDB"].RequiresTagProcessing) {
+                if ($Item.DBClusterArn -and (Get-Command Get-RDSTag -ErrorAction SilentlyContinue)) {
+                    $tags = Get-RDSTag -ResourceName $Item.DBClusterArn -Credential $Credential -Region $Region -ErrorAction Stop
+                    Add-TagProperties -Object $docdbClusterObj -Tags $tags
+                }
+            } else {
+                Write-ScriptOutput "Skipping tag fetch for DocumentDB $clusterId (RequiresTagProcessing = false)" -Level Info
             }
         } catch {
             Write-ScriptOutput "Failed to get tags for DocumentDB cluster $clusterId : $_" -Level Warning
@@ -1608,9 +1658,13 @@ function Process-DynamoDBTable {
         }
 
         try {
-            if (Get-Command Get-DDBTableTag -ErrorAction SilentlyContinue) {
-                $tags = Get-DDBTableTag -TableName $tableName -Credential $Credential -Region $Region -ErrorAction Stop
-                Add-TagProperties -Object $ddbObj -Tags $tags
+            if ($script:ServiceRegistry["DynamoDB"].RequiresTagProcessing) {
+                if (Get-Command Get-DDBTableTag -ErrorAction SilentlyContinue) {
+                    $tags = Get-DDBTableTag -TableName $tableName -Credential $Credential -Region $Region -ErrorAction Stop
+                    Add-TagProperties -Object $ddbObj -Tags $tags
+                }
+            } else {
+                Write-ScriptOutput "Skipping tag fetch for DynamoDB table $tableName (RequiresTagProcessing = false)" -Level Info
             }
         } catch { }
 
@@ -1696,9 +1750,13 @@ function Process-RedshiftCluster {
         }
 
         try {
-            if (Get-Command Get-RSClusterTag -ErrorAction SilentlyContinue) {
-                $tags = Get-RSClusterTag -ClusterIdentifier $clusterId -Credential $Credential -Region $Region -ErrorAction Stop
-                Add-TagProperties -Object $rsObj -Tags $tags
+            if ($script:ServiceRegistry["Redshift"].RequiresTagProcessing) {
+                if (Get-Command Get-RSClusterTag -ErrorAction SilentlyContinue) {
+                    $tags = Get-RSClusterTag -ClusterIdentifier $clusterId -Credential $Credential -Region $Region -ErrorAction Stop
+                    Add-TagProperties -Object $rsObj -Tags $tags
+                }
+            } else {
+                Write-ScriptOutput "Skipping tag fetch for Redshift $clusterId (RequiresTagProcessing = false)" -Level Info
             }
         } catch { }
 
