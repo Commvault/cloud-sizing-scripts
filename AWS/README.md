@@ -7,7 +7,7 @@ It provides a unified view of key AWS resources, their configurations, and capac
 
 The script collects information for the following services:
 - **EC2** — Instances with attached/unattached EBS volumes  
-- **S3** — Buckets and storage metrics  
+- **S3** — Buckets and storage metrics (size is primarily derived from CloudWatch `BucketSizeBytes`; values may differ from real-time S3 Console size due to CloudWatch metric update intervals)
 - **EFS** — Elastic File Systems  
 - **FSx** — File systems (ONTAP/SVX, Windows, Lustre, etc.)  
 - **RDS** — Database Instances  
@@ -119,7 +119,7 @@ By default, the script inventories **all available services**. To inventory only
 
 **Supported Services:**
 - `EC2` — EC2 instances and attached/unattached EBS volumes
-- `S3` — S3 buckets and storage metrics
+- `S3` — S3 buckets and storage metrics (size is primarily derived from CloudWatch `BucketSizeBytes`; values may differ from real-time S3 Console size due to CloudWatch metric update intervals)
 - `EFS` — Elastic File Systems
 - `FSX` — FSx file systems (Windows, ONTAP, Lustre, etc.)
 - `FSX_SVM` — FSx ONTAP Storage Virtual Machines and volumes
