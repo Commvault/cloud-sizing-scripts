@@ -7,7 +7,7 @@
 .DESCRIPTION
     Inventories AWS Services across one or multiple accounts and regions:
       - EC2 instances (with attached/unattached EBS volumes)
-      - S3 buckets and storage metrics
+      - S3 buckets and storage metrics (size is primarily derived from CloudWatch `BucketSizeBytes`; values may differ from real-time S3 Console size due to CloudWatch metric update intervals)
       - Elastic File System (EFS)
       - FSx file systems (ONTAP/SVX, Windows, Lustre, etc.)
       - RDS database instances
@@ -715,7 +715,7 @@ function Process-S3Bucket {
             $actualRegion = if ($Region) { $Region } else { "us-east-1" }
         }
 
-        $storageClasses = @("STANDARD", "STANDARD_IA", "ONEZONE_IA", "REDUCED_REDUNDANCY", "GLACIER", "DEEP_ARCHIVE", "INTELLIGENT_TIERING")
+        $storageClasses = @("STANDARD", "STANDARD_IA", "ONEZONE_IA", "REDUCED_REDUNDANCY", "GLACIER", "GLACIER_IR", "DEEP_ARCHIVE", "INTELLIGENT_TIERING")
         $classBytes = @{}
         $totalBytes = 0.0
 
@@ -1324,7 +1324,7 @@ function Process-EKSCluster {
         $sizeGiB = [math]::Round($sizeBytes / 1GB, 4)
         $sizeTiB = [math]::Round($sizeGiB / 1024, 6)
         $sizeGB  = [math]::Round($sizeGiB * 1.073741824, 4)
-        $sizeTB  = [math]::Round($sizeGB / 1024, 6)
+        $sizeTB  = [math]::Round($sizeGB / 1000, 6)
 
         return [PSCustomObject]@{
             AwsAccountId    = "`u{200B}$($AccountInfo.Account)"
@@ -2347,7 +2347,7 @@ function Get-S3BucketSize {
 
         $storageTypes = @(
             'StandardStorage','StandardIAStorage','OneZoneIAStorage',
-            'ReducedRedundancyStorage','GlacierStorage','DeepArchiveStorage','IntelligentTieringStorage'
+            'ReducedRedundancyStorage','GlacierStorage','GlacierInstantRetrievalStorage','DeepArchiveStorage','IntelligentTieringStorage'
         )
 
         $totalBytes = 0
@@ -2379,6 +2379,7 @@ function Get-S3BucketSizeByStorageClass {
             'ONEZONE_IA'           = 'OneZoneIAStorage'
             'REDUCED_REDUNDANCY'   = 'ReducedRedundancyStorage'
             'GLACIER'              = 'GlacierStorage'
+            'GLACIER_IR'           = 'GlacierInstantRetrievalStorage'
             'DEEP_ARCHIVE'         = 'DeepArchiveStorage'
             'INTELLIGENT_TIERING'  = 'IntelligentTieringStorage'
         }
