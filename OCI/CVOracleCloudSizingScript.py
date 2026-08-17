@@ -831,3 +831,26 @@ if __name__ == "__main__":
     else:
         logging.error(f"Unsupported workload specified: {workload}. Supported workloads are: instances, object_storage, db_systems, oke_clusters. If you want to gather information for all workloads, use --workload=all or don't specify the --workload argument at all.")
         sys.exit(1)
+
+    # --- AI JSON export ---
+    ai_report = {
+        "profile": profile_name,
+        "workload": workload,
+        "aggregate_summary": {
+            "compute_instances":      total_instances,
+            "compute_size_gb":        total_instance_sizeGB,
+            "object_storage_buckets": total_buckets,
+            "object_storage_gb":      total_storageGB,
+            "db_systems":             total_db_systems,
+            "db_system_size_gb":      total_db_system_sizeGB,
+            "oke_clusters":           total_oke_clusters,
+            "oke_node_count":         total_oke_node_count,
+            "oke_pvc_count":          total_oke_pvc_count,
+            "oke_pvc_size_gb":        total_oke_pvc_size_gb,
+        }
+    }
+    ai_json_path = os.path.join(metrics_dir, f"{profile_name}_{workload}_{timestamp}.json")
+    with open(ai_json_path, "w") as f:
+        json.dump(ai_report, f, indent=2)
+    logging.info(f"AI JSON report created: {ai_json_path}")
+    # --- end AI JSON export ---

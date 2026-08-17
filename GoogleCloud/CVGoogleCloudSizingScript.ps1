@@ -3216,6 +3216,67 @@ Write-Host "Inventory summary exported: $(Split-Path $summaryCsv -Leaf)" -Foregr
 # -------------------------
 # Finalize log, then ZIP
 # -------------------------
+# --- AI JSON export (per project + combined) ---
+foreach ($proj in $targetProjects) {
+    $pVMs   = $vmData        | Where-Object { $_.Project -eq $proj }
+    $pBkts  = $bucketData    | Where-Object { $_.Project -eq $proj }
+    $pFS    = $fileshareData | Where-Object { $_.Project -eq $proj }
+    $pDB    = $databaseData  | Where-Object { $_.Project -eq $proj }
+    $pGKE   = $gkeData       | Where-Object { $_.Project -eq $proj }
+    $entry = [ordered]@{
+        project_id        = $proj
+        aggregate_summary = [ordered]@{
+            compute_vms      = ($pVMs  | Measure-Object).Count
+            storage_buckets  = ($pBkts | Measure-Object).Count
+            file_shares      = ($pFS   | Measure-Object).Count
+            databases        = ($pDB   | Measure-Object).Count
+            gke_clusters     = ($pGKE  | Measure-Object).Count
+            total_vm_disk_gb = [math]::Round((($pVMs | Where-Object { $_.DiskGB } | Measure-Object -Property DiskGB -Sum).Sum), 2)
+        }
+        detailed_inventory = [ordered]@{
+            compute_vms     = $pVMs
+            storage_buckets = $pBkts
+            file_shares     = $pFS
+            databases       = $pDB
+            gke_clusters    = $pGKE
+        }
+    }
+    $projJsonPath = Join-Path $outDir "gcp_ai_report_${proj}_${dateStr}.json"
+    $entry | ConvertTo-Json -Depth 10 | Set-Content -Path $projJsonPath -Encoding UTF8
+    Write-Host "AI JSON created: $projJsonPath" -ForegroundColor Cyan
+}
+if ($targetProjects.Count -gt 1) {
+    $allEntries = foreach ($proj in $targetProjects) {
+        $pVMs  = $vmData        | Where-Object { $_.Project -eq $proj }
+        $pBkts = $bucketData    | Where-Object { $_.Project -eq $proj }
+        $pFS   = $fileshareData | Where-Object { $_.Project -eq $proj }
+        $pDB   = $databaseData  | Where-Object { $_.Project -eq $proj }
+        $pGKE  = $gkeData       | Where-Object { $_.Project -eq $proj }
+        [ordered]@{
+            project_id        = $proj
+            aggregate_summary = [ordered]@{
+                compute_vms      = ($pVMs  | Measure-Object).Count
+                storage_buckets  = ($pBkts | Measure-Object).Count
+                file_shares      = ($pFS   | Measure-Object).Count
+                databases        = ($pDB   | Measure-Object).Count
+                gke_clusters     = ($pGKE  | Measure-Object).Count
+                total_vm_disk_gb = [math]::Round((($pVMs | Where-Object { $_.DiskGB } | Measure-Object -Property DiskGB -Sum).Sum), 2)
+            }
+            detailed_inventory = [ordered]@{
+                compute_vms     = $pVMs
+                storage_buckets = $pBkts
+                file_shares     = $pFS
+                databases       = $pDB
+                gke_clusters    = $pGKE
+            }
+        }
+    }
+    $combinedPath = Join-Path $outDir "gcp_ai_report_ALL_PROJECTS_${dateStr}.json"
+    ([ordered]@{ projects = @($allEntries) }) | ConvertTo-Json -Depth 10 | Set-Content -Path $combinedPath -Encoding UTF8
+    Write-Host "Combined AI JSON created: $combinedPath" -ForegroundColor Cyan
+}
+# --- end AI JSON export ---
+
 Write-Progress -Id 5 -Activity "Generating Output Files" -Status "Finalizing log..." -PercentComplete 75
 Stop-Transcript | Out-Null   # end transcript (separate from detail log)
 

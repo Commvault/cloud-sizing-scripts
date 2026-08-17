@@ -102,12 +102,16 @@ param (
     [Parameter(ParameterSetName='CrossAccountRole')]
     [ValidateNotNullOrEmpty()][string]$UserSpecifiedAccountsFile,
 
+    [Parameter(ParameterSetName='SSOScanAllAccounts',Mandatory=$true)]
+    [switch]$SSOScanAllAccounts,
+
     [ValidateSet("GovCloud","")][string]$Partition,
     [string]$ProfileLocation,
     [string]$Regions,
     [string]$RegionToQuery,
     [switch]$SkipBucketTags,
     [switch]$DebugBucketTags,
+    [switch]$DryRun,
     [switch]$SelectiveZipping = $true
 )
 
@@ -581,20 +585,25 @@ function Process-EC2Instance {
     $sizes = Convert-BytesToSizes -Bytes $totalEbsBytes
 
         $ec2Obj = [PSCustomObject]@{
-            AwsAccountId = "`u{200B}$($AccountInfo.Account)"
-        AwsAccountAlias = $AccountAlias
-        Region = $Region
-        InstanceId = $Item.InstanceId
-        InstanceType = $Item.InstanceType
-        State = $Item.State.Name
-        LaunchTime = $Item.LaunchTime
-        VolumeCount = $ebsVolumes.Count
-        SizeGiB = $sizes.SizeGiB
-        SizeTiB = $sizes.SizeTiB
-        SizeGB = $sizes.SizeGB
-        SizeTB = $sizes.SizeTB
-        VolumeDetails = ($ebsVolumes | ForEach-Object { "$($_.VolumeId):$($_.Size)GB:$($_.VolumeType)" }) -join ";"
-    }
+            AwsAccountId    = "`u{200B}$($AccountInfo.Account)"
+            AwsAccountAlias = $AccountAlias
+            Region          = $Region
+            InstanceId      = $Item.InstanceId
+            InstanceType    = $Item.InstanceType
+            Platform        = if ($Item.Platform) { $Item.Platform } else { 'Linux' }
+            State           = $Item.State.Name
+            PublicIpAddress = if ($Item.PublicIpAddress) { $Item.PublicIpAddress } else { '' }
+            LaunchTime      = $Item.LaunchTime
+            VolumeCount     = $ebsVolumes.Count
+            SizeGiB         = $sizes.SizeGiB
+            SizeTiB         = $sizes.SizeTiB
+            SizeGB          = $sizes.SizeGB
+            SizeTB          = $sizes.SizeTB
+            VolumeDetails   = ($ebsVolumes | ForEach-Object { "$($_.VolumeId):$($_.Size)GB:$($_.VolumeType)" }) -join ";"
+        }
+        # IsProtected: true if any tag key or value contains 'backup'
+        $isProtected = $instanceTags | Where-Object { $_.Key -match 'backup' -or $_.Value -match 'backup' }
+        $ec2Obj | Add-Member -MemberType NoteProperty -Name 'IsProtected' -Value ([bool]$isProtected)
 
     Add-TagProperties -Object $ec2Obj -Tags $instanceTags
 
@@ -1355,7 +1364,12 @@ function Process-RDSInstance {
             Region                = $Region
             DBInstanceIdentifier  = $Item.DBInstanceIdentifier
             Engine                = $Item.Engine
+            EngineVersion         = if ($Item.EngineVersion) { $Item.EngineVersion } else { '' }
             DBInstanceClass       = $Item.DBInstanceClass
+            DBInstanceStatus      = if ($Item.DBInstanceStatus) { $Item.DBInstanceStatus } else { '' }
+            MultiAZ               = [bool]$Item.MultiAZ
+            StorageEncrypted      = [bool]$Item.StorageEncrypted
+            BackupRetentionPeriod = if ($null -ne $Item.BackupRetentionPeriod) { $Item.BackupRetentionPeriod } else { 0 }
             SizeGiB               = $sizes.SizeGiB
             SizeTiB               = $sizes.SizeTiB
             SizeGB                = $sizes.SizeGB
@@ -2725,12 +2739,82 @@ function Invoke-AuthenticationScenarios {
                 Write-ScriptOutput "Cross-account role processing requires UserSpecifiedAccounts or UserSpecifiedAccountsFile" -Level Error
             }
         }
+        SSOScanAllAccounts = {
+            Write-ScriptOutput "Starting SSO multi-account scan..." -Level Info
+            try {
+                # Find the SSO token from the local cache written by 'aws sso login'
+                $ssoCache = Join-Path $env:USERPROFILE ".aws/sso/cache"
+                $tokenFile = Get-ChildItem $ssoCache -Filter "*.json" -ErrorAction Stop |
+                    Where-Object { (Get-Content $_.FullName -Raw | ConvertFrom-Json).accessToken } |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if (-not $tokenFile) { throw "No valid SSO token cache found. Run 'aws sso login' first." }
+                $tokenData   = Get-Content $tokenFile.FullName -Raw | ConvertFrom-Json
+                $accessToken = $tokenData.accessToken
+                $ssoRegion   = if ($tokenData.region) { $tokenData.region } else { 'us-east-1' }
+
+                # Read the SSO role name from the first SSO profile found in ~/.aws/config
+                $configFile = Join-Path $env:USERPROFILE ".aws/config"
+                $configText = Get-Content $configFile -Raw -ErrorAction SilentlyContinue
+                $ssoRoleName = if ($configText -match 'sso_role_name\s*=\s*(.+)') { $Matches[1].Trim() } else { $null }
+                if (-not $ssoRoleName) { throw "Could not determine sso_role_name from ~/.aws/config" }
+
+                # Page through all accounts the SSO token can access
+                $nextToken = $null
+                do {
+                    $listArgs = @('sso', 'list-accounts', '--access-token', $accessToken, '--region', $ssoRegion, '--output', 'json')
+                    if ($nextToken) { $listArgs += @('--next-token', $nextToken) }
+                    $listResult = (aws @listArgs | ConvertFrom-Json)
+                    $nextToken  = $listResult.nextToken
+
+                    foreach ($acct in $listResult.accountList) {
+                        Write-ScriptOutput "SSO: scanning account $($acct.accountId) ($($acct.accountName))" -Level Info
+                        if ($DryRun) {
+                            Write-ScriptOutput "[DryRun] Would scan account $($acct.accountId)" -Level Info
+                            continue
+                        }
+                        try {
+                            $roleCredsJson = aws sso get-role-credentials `
+                                --account-id $acct.accountId `
+                                --role-name $ssoRoleName `
+                                --access-token $accessToken `
+                                --region $ssoRegion `
+                                --output json | ConvertFrom-Json
+                            $creds = $roleCredsJson.roleCredentials
+
+                            $oldKey   = $env:AWS_ACCESS_KEY_ID
+                            $oldSec   = $env:AWS_SECRET_ACCESS_KEY
+                            $oldToken = $env:AWS_SESSION_TOKEN
+                            try {
+                                $env:AWS_ACCESS_KEY_ID     = $creds.accessKeyId
+                                $env:AWS_SECRET_ACCESS_KEY = $creds.secretAccessKey
+                                $env:AWS_SESSION_TOKEN     = $creds.sessionToken
+                                Invoke-AWSDataCollection -Credential $null
+                            } finally {
+                                if ($null -ne $oldKey)   { $env:AWS_ACCESS_KEY_ID     = $oldKey   } else { Remove-Item Env:AWS_ACCESS_KEY_ID     -ErrorAction SilentlyContinue }
+                                if ($null -ne $oldSec)   { $env:AWS_SECRET_ACCESS_KEY = $oldSec   } else { Remove-Item Env:AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue }
+                                if ($null -ne $oldToken) { $env:AWS_SESSION_TOKEN     = $oldToken } else { Remove-Item Env:AWS_SESSION_TOKEN     -ErrorAction SilentlyContinue }
+                            }
+                        } catch {
+                            Write-ScriptOutput "SSO: failed to scan account $($acct.accountId): $_" -Level Warning
+                        }
+                    }
+                } while ($nextToken)
+            } catch {
+                Write-ScriptOutput "SSOScanAllAccounts failed: $_" -Level Error
+            }
+        }
         Default = {
             Invoke-AWSDataCollection -Credential $null
         }
     }
 
-    $scenario = if ($AllLocalProfiles) { 'AllLocalProfiles' }
+    # Fall back to DefaultProfile when no auth switch was supplied
+    if (-not $AllLocalProfiles -and -not $UserSpecifiedProfileNames -and -not $CrossAccountRoleName -and -not $SSOScanAllAccounts) {
+        $DefaultProfile = $true
+    }
+
+    $scenario = if ($SSOScanAllAccounts) { 'SSOScanAllAccounts' }
+                elseif ($AllLocalProfiles) { 'AllLocalProfiles' }
                 elseif ($UserSpecifiedProfileNames) { 'UserSpecifiedProfiles' }
                 elseif ($CrossAccountRoleName) { 'CrossAccountRole' }
                 else { 'Default' }
@@ -3224,6 +3308,87 @@ try {
     if ($script:AccountsProcessed.Count -gt 0) {
         ComprehensiveSummary
     }
+
+    # --- AI JSON export (per account + combined) ---
+    function Export-AIJson {
+        param([object]$AccountInfo)
+        $acctId = $AccountInfo.Account
+        $alias  = $AccountInfo.AccountAlias
+        $svcData = $script:ServiceDataByAccount[$acctId]
+        $entry = [ordered]@{
+            account_id    = $acctId
+            account_alias = $alias
+            aggregate_summary = [ordered]@{
+                ec2_instances  = ($svcData['EC2'] | Measure-Object).Count
+                s3_buckets     = ($svcData['S3'] | Measure-Object).Count
+                efs_volumes    = ($svcData['EFS'] | Measure-Object).Count
+                fsx_volumes    = ($svcData['FSx'] | Measure-Object).Count
+                rds_instances  = ($svcData['RDS'] | Measure-Object).Count
+                dynamodb_tables = ($svcData['DynamoDB'] | Measure-Object).Count
+                redshift_clusters = ($svcData['Redshift'] | Measure-Object).Count
+                eks_clusters   = ($svcData['EKS'] | Measure-Object).Count
+                docdb_clusters = ($svcData['DocumentDB'] | Measure-Object).Count
+                total_size_gb  = [math]::Round((($svcData.Values | ForEach-Object { $_ } | Where-Object { $_.SizeGB } | Measure-Object -Property SizeGB -Sum).Sum), 2)
+            }
+            detailed_inventory = [ordered]@{
+                ec2_instances     = $svcData['EC2']
+                s3_buckets        = $svcData['S3']
+                efs_volumes       = $svcData['EFS']
+                fsx_volumes       = $svcData['FSx']
+                rds_instances     = $svcData['RDS']
+                dynamodb_tables   = $svcData['DynamoDB']
+                redshift_clusters = $svcData['Redshift']
+                eks_clusters      = $svcData['EKS']
+                docdb_clusters    = $svcData['DocumentDB']
+            }
+        }
+        $jsonPath = Join-Path $script:Config.OutputPath "aws_ai_report_${acctId}_${date_string}.json"
+        $entry | ConvertTo-Json -Depth 10 | Set-Content -Path $jsonPath -Encoding UTF8
+        Write-ScriptOutput "AI JSON report created: $jsonPath" -Level Success
+        $script:AllOutputFiles.Add($jsonPath) | Out-Null
+    }
+
+    function Export-CombinedAIJson {
+        $allEntries = foreach ($acct in $script:AccountsProcessed) {
+            $svcData = $script:ServiceDataByAccount[$acct.Account]
+            [ordered]@{
+                account_id    = $acct.Account
+                account_alias = $acct.AccountAlias
+                aggregate_summary = [ordered]@{
+                    ec2_instances     = ($svcData['EC2'] | Measure-Object).Count
+                    s3_buckets        = ($svcData['S3'] | Measure-Object).Count
+                    efs_volumes       = ($svcData['EFS'] | Measure-Object).Count
+                    fsx_volumes       = ($svcData['FSx'] | Measure-Object).Count
+                    rds_instances     = ($svcData['RDS'] | Measure-Object).Count
+                    dynamodb_tables   = ($svcData['DynamoDB'] | Measure-Object).Count
+                    redshift_clusters = ($svcData['Redshift'] | Measure-Object).Count
+                    eks_clusters      = ($svcData['EKS'] | Measure-Object).Count
+                    docdb_clusters    = ($svcData['DocumentDB'] | Measure-Object).Count
+                    total_size_gb     = [math]::Round((($svcData.Values | ForEach-Object { $_ } | Where-Object { $_.SizeGB } | Measure-Object -Property SizeGB -Sum).Sum), 2)
+                }
+                detailed_inventory = [ordered]@{
+                    ec2_instances     = $svcData['EC2']
+                    s3_buckets        = $svcData['S3']
+                    efs_volumes       = $svcData['EFS']
+                    fsx_volumes       = $svcData['FSx']
+                    rds_instances     = $svcData['RDS']
+                    dynamodb_tables   = $svcData['DynamoDB']
+                    redshift_clusters = $svcData['Redshift']
+                    eks_clusters      = $svcData['EKS']
+                    docdb_clusters    = $svcData['DocumentDB']
+                }
+            }
+        }
+        $combined = [ordered]@{ accounts = @($allEntries) }
+        $jsonPath = Join-Path $script:Config.OutputPath "aws_ai_report_ALL_ACCOUNTS_${date_string}.json"
+        $combined | ConvertTo-Json -Depth 10 | Set-Content -Path $jsonPath -Encoding UTF8
+        Write-ScriptOutput "Combined AI JSON (all accounts) created: $jsonPath" -Level Success
+        $script:AllOutputFiles.Add($jsonPath) | Out-Null
+    }
+
+    foreach ($account in $script:AccountsProcessed) { Export-AIJson -AccountInfo $account }
+    if ($script:AccountsProcessed.Count -gt 1) { Export-CombinedAIJson }
+    # --- end AI JSON export ---
 
     foreach ($account in $script:AccountsProcessed) {
         Write-ScriptOutput "Account: $($account.Account) ($($account.AccountAlias))" -Level Info

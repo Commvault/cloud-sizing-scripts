@@ -2850,6 +2850,99 @@ if ($summaryRows.Count) {
 
 Write-Host "`n=== All Output Files Created Successfully ===" -ForegroundColor Green
 
+# --- AI JSON export (per subscription + combined) ---
+$aiJsonFiles = @()
+foreach ($sub in $subs) {
+    $subVMs        = $VMs            | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+    $subStorage    = $StorageAccounts| Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+    $subShares     = $FileShares     | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+    $subNetApp     = $NetAppVolumes  | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+    $subSqlDb      = $SqlDbInventory | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+    $subSqlMI      = $SqlMIDbInventory | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+    $subMySQL      = $MySQLServers   | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+    $subPgSQL      = $PostgreSQLServers | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+    $subCosmos     = $CosmosDBs      | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+    $subAKS        = $AKSClusters    | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+    $entry = [ordered]@{
+        subscription_id   = $sub.Id
+        subscription_name = $sub.Name
+        aggregate_summary = [ordered]@{
+            virtual_machines     = ($subVMs     | Measure-Object).Count
+            storage_accounts     = ($subStorage | Measure-Object).Count
+            file_shares          = ($subShares  | Measure-Object).Count
+            netapp_volumes       = ($subNetApp  | Measure-Object).Count
+            sql_databases        = ($subSqlDb   | Measure-Object).Count
+            sql_mi_databases     = ($subSqlMI   | Measure-Object).Count
+            mysql_servers        = ($subMySQL   | Measure-Object).Count
+            postgresql_servers   = ($subPgSQL   | Measure-Object).Count
+            cosmosdb_accounts    = ($subCosmos  | Measure-Object).Count
+            aks_clusters         = ($subAKS     | Measure-Object).Count
+        }
+        detailed_inventory = [ordered]@{
+            virtual_machines   = $subVMs
+            storage_accounts   = $subStorage
+            file_shares        = $subShares
+            netapp_volumes     = $subNetApp
+            sql_databases      = $subSqlDb
+            sql_mi_databases   = $subSqlMI
+            mysql_servers      = $subMySQL
+            postgresql_servers = $subPgSQL
+            cosmosdb_accounts  = $subCosmos
+            aks_clusters       = $subAKS
+        }
+    }
+    $subJsonPath = Join-Path $outdir "azure_ai_report_$($sub.Id)_$dateStr.json"
+    $entry | ConvertTo-Json -Depth 10 | Set-Content -Path $subJsonPath -Encoding UTF8
+    Write-Host "AI JSON created: $subJsonPath" -ForegroundColor Cyan
+    $aiJsonFiles += $subJsonPath
+}
+if ($subs.Count -gt 1) {
+    $allEntries = foreach ($sub in $subs) {
+        $subVMs    = $VMs            | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+        $subStorage= $StorageAccounts| Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+        $subShares = $FileShares     | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+        $subNetApp = $NetAppVolumes  | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+        $subSqlDb  = $SqlDbInventory | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+        $subSqlMI  = $SqlMIDbInventory | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+        $subMySQL  = $MySQLServers   | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+        $subPgSQL  = $PostgreSQLServers | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+        $subCosmos = $CosmosDBs      | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+        $subAKS    = $AKSClusters    | Where-Object { $_.SubscriptionId -eq $sub.Id -or $_.SubscriptionName -eq $sub.Name }
+        [ordered]@{
+            subscription_id   = $sub.Id
+            subscription_name = $sub.Name
+            aggregate_summary = [ordered]@{
+                virtual_machines   = ($subVMs     | Measure-Object).Count
+                storage_accounts   = ($subStorage | Measure-Object).Count
+                file_shares        = ($subShares  | Measure-Object).Count
+                netapp_volumes     = ($subNetApp  | Measure-Object).Count
+                sql_databases      = ($subSqlDb   | Measure-Object).Count
+                sql_mi_databases   = ($subSqlMI   | Measure-Object).Count
+                mysql_servers      = ($subMySQL   | Measure-Object).Count
+                postgresql_servers = ($subPgSQL   | Measure-Object).Count
+                cosmosdb_accounts  = ($subCosmos  | Measure-Object).Count
+                aks_clusters       = ($subAKS     | Measure-Object).Count
+            }
+            detailed_inventory = [ordered]@{
+                virtual_machines   = $subVMs
+                storage_accounts   = $subStorage
+                file_shares        = $subShares
+                netapp_volumes     = $subNetApp
+                sql_databases      = $subSqlDb
+                sql_mi_databases   = $subSqlMI
+                mysql_servers      = $subMySQL
+                postgresql_servers = $subPgSQL
+                cosmosdb_accounts  = $subCosmos
+                aks_clusters       = $subAKS
+            }
+        }
+    }
+    $combinedPath = Join-Path $outdir "azure_ai_report_ALL_SUBSCRIPTIONS_$dateStr.json"
+    ([ordered]@{ subscriptions = @($allEntries) }) | ConvertTo-Json -Depth 10 | Set-Content -Path $combinedPath -Encoding UTF8
+    Write-Host "Combined AI JSON created: $combinedPath" -ForegroundColor Cyan
+}
+# --- end AI JSON export ---
+
 Write-Progress -Id 5 -Activity "Generating Output Files" -Status "Creating ZIP archive..." -PercentComplete 90
 
 Stop-Transcript
